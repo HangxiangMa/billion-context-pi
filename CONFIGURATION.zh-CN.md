@@ -175,6 +175,8 @@
 | `compress.emergencyThresholdPercent` | number \| string | `"95%"` | 🟢 ACTIVE | 触发紧急截断的上下文阈值。 |
 | `compress.nudgeGrowthTokens` | number | `50000` | 🟢 ACTIVE | 软压缩 nudge 的 token 增长步长。 |
 | `compress.reasoning` | object | `{ "drop": true, "threshold": 2048 }` | 🟢 ACTIVE | 请求时丢弃历史 `compress` 调用上的超大思考（不修改持久化历史）。 |
+| `compress.stripImages` | boolean | `false` | 🟢 ACTIVE | **可选开启**：wire 层剥离历史图像载荷（issue #321）。为 `true` 时，除最近 `stripImagesKeepRecent` 条消息外，历史消息的图像部分在上游请求体中被剥离；纯图像消息折叠为 `"[image]"` 文本占位符。支持协议：anthropic-messages、openai-completions、openai-responses（含 azure/codex 变体）。 |
+| `compress.stripImagesKeepRecent` | number | `5` | 🟢 ACTIVE | `stripImages` 开启时保留图像载荷的最近消息条数。 |
 
 **prompts 键**
 

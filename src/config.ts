@@ -170,6 +170,16 @@ export interface CompressSettings {
    *  overrides only; a pack's `toolPrompts` follow the base selection (tool
    *  definitions freeze at extension load, before the model is known). */
   promptPack?: string;
+  /** Opt-in wire-level strip of historical image payloads (issue #321, kernel
+   *  #215). Default: false (images ride along verbatim, current behavior).
+   *  When true, every message older than `stripImagesKeepRecent` has its image
+   *  parts dropped from the outbound provider body (image-only messages
+   *  collapse to a "[image]" text placeholder). Host-side policy only — the
+   *  strip primitive lives in acp-kernel's wire layer. */
+  stripImages?: boolean;
+  /** How many of the MOST RECENT messages keep their image payloads when
+   *  `stripImages` is enabled. Default: 5. Ignored when stripImages is off. */
+  stripImagesKeepRecent?: number;
 }
 
 /** Per-provider compression overrides. Carries the same tuning fields as the
@@ -495,6 +505,8 @@ export function mergeCompress(
       threshold: model?.reasoning?.threshold ?? provider?.reasoning?.threshold ?? global?.reasoning?.threshold,
     },
     promptPack: model?.promptPack ?? provider?.promptPack ?? global?.promptPack,
+    stripImages: model?.stripImages ?? provider?.stripImages ?? global?.stripImages,
+    stripImagesKeepRecent: model?.stripImagesKeepRecent ?? provider?.stripImagesKeepRecent ?? global?.stripImagesKeepRecent,
   };
 }
 

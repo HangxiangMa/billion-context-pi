@@ -127,6 +127,9 @@ export interface AcpRuntime {
    *  (three-level merge + defaults). Feeds the request-time pass in the
    *  context transform. */
   reasoningDropFor(ctx: ExtensionContext): Required<CompressReasoningConfig>;
+  /** Effective historical-image strip policy for the active model (issue #321).
+   *  Host-side policy — deliberately NOT part of the kernel Config object. */
+  stripImagesFor(ctx: ExtensionContext): { enabled: boolean; keepRecent: number };
   /** Re-read ~/.<dir>/acp.json + <cwd>/<dir>/acp.json and re-derive the adapter
    *  config when the contents change. Cheap no-op when unchanged. Called at
    *  session_start and on every context event so config edits apply live. */
@@ -592,6 +595,14 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     return gated;
   }
 
+  function stripImagesFor(ctx: ExtensionContext): { enabled: boolean; keepRecent: number } {
+    const m = ctx.model as { provider?: string; id?: string } | undefined;
+    const c = resolveCompress(adapterRef.compress, m?.provider, m?.id);
+    const raw = Number(c.stripImagesKeepRecent);
+    const keepRecent = Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 5;
+    return { enabled: c.stripImages === true, keepRecent };
+  }
+
   async function reloadConfig(cwd: string): Promise<void> {
     let user;
     try {
@@ -716,4 +727,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   let refused = false;
   let refusalMessage: string | null = null;
   let delegateStoodDown = false;
-  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale, noteHostUsage, dropHostUsageSamples, noteSizeDivergence, dropSizeDivergence, noteTerminalEscape, dropTerminalEscape, noteTruncationSkipped, dropTruncationSkipped };}
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale, noteHostUsage, dropHostUsageSamples, noteSizeDivergence, dropSizeDivergence, noteTerminalEscape, dropTerminalEscape, noteTruncationSkipped, dropTruncationSkipped, stripImagesFor };}
