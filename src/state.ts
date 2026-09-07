@@ -86,10 +86,14 @@ export class SessionStateStore {
 
   async save(state: CompressionState, sessionFile: string | undefined, sessionId: string): Promise<void> {
     const file = stateFileFor(sessionFile);
-    if (!file) return;
     const key = cacheKey(sessionFile, sessionId);
     const liveRefOrigins = this.cache.get(key)?.liveRefOrigins ?? [];
+    // Cache update is unconditional: file-less (in-memory) sessions have no
+    // sidecar to persist, but their state must still survive across turns in
+    // this process — otherwise every compress result is dropped and the model
+    // re-compresses the same original context forever (issue #322).
     this.cache.set(key, { state, liveRefOrigins });
+    if (!file) return;
     const dir = path.dirname(file);
     await fs.mkdir(dir, { recursive: true }).catch((e: unknown) => {
       logError("state", { event: "save-mkdir-failed", dir, error: e instanceof Error ? e.message : String(e) });
