@@ -175,9 +175,9 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     }
     if (standDownIfProxied(ctx)) return;
     runtime.store.invalidate();
-    runtime.clearNudgeTracking();
+    runtime.clearNudgeTracking(ctx.sessionManager.getSessionId());
     runtime.throttleFor(ctx.sessionManager.getSessionId()).reset();
-    runtime.clearCompressRetryTracking();
+    runtime.clearCompressRetryTracking(ctx.sessionManager.getSessionId());
     resetDelegateUsage();
     setDelegateDisplayUsage("separate");
     setDelegatePolicy(DEFAULT_DELEGATE_POLICY);
@@ -231,7 +231,10 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     delegateStatusWidget.setContext(ctx, runningRunsSnapshot);
   });
   pi.on("session_shutdown", (_event, ctx) => {
-    runtime.clearDeadCompress(ctx.sessionManager.getSessionId());
+    const sid = ctx.sessionManager.getSessionId();
+    runtime.clearDeadCompress(sid);
+    runtime.clearNudgeTracking(sid);
+    runtime.clearCompressRetryTracking(sid);
     delegateStatusWidget.dispose();
     closeLogStream();
   });
@@ -397,7 +400,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     // the cap suppression sees the newest outcome (a success on this fire
     // must lift the cap on this same fire).
     const compressOutcomes = collectCompressOutcomes(entries, turnStartIndex(entries));
-    const outcome = compressOutcomes.length > 0 ? runtime.noteCompressOutcomes(turnKey, compressOutcomes) : null;
+    const outcome = compressOutcomes.length > 0 ? runtime.noteCompressOutcomes(sid, turnKey, compressOutcomes) : null;
 
     if (turn.nudge?.shouldInject) {
       // Two independent channels for the nudge:
@@ -424,8 +427,8 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       // keeps usage pinned at emergency). Once this turn burned
       // MAX_COMPRESS_ATTEMPTS attempts, stop re-injecting the nudge — the
       // kernel's emergency truncation still shrinks context mechanically.
-      const retryCapped = runtime.compressRetryCappedFor(turnKey);
-      const alreadyShown = retryCapped || (!emergency && runtime.nudgeShownFor(turnKey));
+      const retryCapped = runtime.compressRetryCappedFor(sid, turnKey);
+      const alreadyShown = retryCapped || (!emergency && runtime.nudgeShownFor(sid, turnKey));
       if (!alreadyShown) {
         rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active), runtime.prompts));
         const rendered = renderNudgeText(turn.nudge, runtime.prompts);
@@ -437,7 +440,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
         if (debugOn && ctx.hasUI) {
           ctx.ui.notify(`[ACP nudge → context]${emergency ? " [EMERGENCY]" : ""}\n${rendered.text}${example}`);
         }
-        if (!emergency) runtime.markNudgeShown(turnKey);
+        if (!emergency) runtime.markNudgeShown(sid, turnKey);
         debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channels: ["context", debugOn ? "terminal" : null].filter(Boolean), emergency, turnKey, text: rendered.text + example });
       } else {
         debug.event("nudge-suppressed", { sid: ctx.sessionManager.getSessionId(), turnKey, reason: turn.nudge.reason });
