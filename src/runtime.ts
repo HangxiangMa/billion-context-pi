@@ -72,25 +72,25 @@ export interface AcpRuntime {
   setAdapter(adapter: AdapterConfig): void;
   prompts: Prompts;
   setPrompts(prompts: Prompts): void;
-  markNudgeShown(turnKey: string, tokenCount?: number): void;
-  nudgeShownFor(turnKey: string): boolean;
+  markNudgeShown(sid: string, turnKey: string, tokenCount?: number): void;
+  nudgeShownFor(sid: string, turnKey: string): boolean;
   /** tokenCount at the last actual nudge injection for this turn, for growth-aware re-inject (issue #269). */
-  nudgeShownTokensFor(turnKey: string): number | undefined;
+  nudgeShownTokensFor(sid: string, turnKey: string): number | undefined;
   /** Clears the token-count stamps recorded by markNudgeShown — used on a token-scale flip (issue #267) so the same-turn re-inject floor (#269 / PR #316) is not computed against an old-scale stamp. */
-  clearNudgeTokenStamps(): void;
+  clearNudgeTokenStamps(sid: string): void;
   /** Process compress toolResults for the CURRENT user turn only (the caller
    *  scopes the list — see collectCompressOutcomes in src/index.ts); idempotent
    *  per toolCallId. Outcome classes: isError or noop (0-block panel) →
    *  failure (count++), success panel (>= 1 block) → reset, other non-error
     *  text → neutral (count unchanged). Returns the failure count and
     *  whether the cap was just reached. */
-  noteCompressOutcomes(turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean }>): { count: number; cappedNow: boolean };
+  noteCompressOutcomes(sid: string, turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean }>): { count: number; cappedNow: boolean };
   /** True when this turn already burned MAX_COMPRESS_ATTEMPTS failed/no-op
    *  compress calls — used to stop re-injecting the (dedup-exempt) emergency
    *  nudge that would otherwise keep looping no-op compressions (issue #6). */
-  compressRetryCappedFor(turnKey: string): boolean;
-  clearNudgeTracking(): void;
-  clearCompressRetryTracking(): void;
+  compressRetryCappedFor(sid: string, turnKey: string): boolean;
+  clearNudgeTracking(sid: string): void;
+  clearCompressRetryTracking(sid: string): void;
   liveContextLimit(ctx: ExtensionContext): number;
   configFor(ctx: ExtensionContext): Config;
   /** [#336] Effective compress.reasoning drop settings for the active model
@@ -272,8 +272,31 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   let adapterRef = adapter;
   let lastUserConfigKey: string | undefined;
   let promptsRef: Prompts = defaultPrompts;
-  const nudgeShownTurns = new Set<string>();
-  const nudgeShownTokens = new Map<string, number>();
+  const nudgeShownTurns = new Map<string, Set<string>>();
+  const nudgeShownTokens = new Map<string, Map<string, number>>();
+  function markNudgeShown(sid: string, turnKey: string, tokenCount?: number): void {
+    let turns = nudgeShownTurns.get(sid);
+    if (!turns) { turns = new Set(); nudgeShownTurns.set(sid, turns); }
+    turns.add(turnKey);
+    if (tokenCount !== undefined) {
+      let toks = nudgeShownTokens.get(sid);
+      if (!toks) { toks = new Map(); nudgeShownTokens.set(sid, toks); }
+      toks.set(turnKey, tokenCount);
+    }
+  }
+  function nudgeShownFor(sid: string, turnKey: string): boolean {
+    return nudgeShownTurns.get(sid)?.has(turnKey) ?? false;
+  }
+  function nudgeShownTokensFor(sid: string, turnKey: string): number | undefined {
+    return nudgeShownTokens.get(sid)?.get(turnKey);
+  }
+  function clearNudgeTracking(sid: string): void {
+    nudgeShownTurns.delete(sid);
+    nudgeShownTokens.delete(sid);
+  }
+  function clearNudgeTokenStamps(sid: string): void {
+    nudgeShownTokens.delete(sid);
+  }
   // Per-session overflow self-heal state (learned window + armed emergency).
   const overflowEpisodes = new Map<string, OverflowEpisode>();
   function overflowFor(sid: string): OverflowEpisode {
@@ -331,38 +354,46 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   // caller feeds only CURRENT-turn outcomes; success resets the counter,
   // neutral outcomes (non-error text that is not a success panel) leave it
   // frozen so mixed failure modes cannot bypass the cap.
-  const compressOutcomeSeen = new Set<string>();
-  let compressFailTurnKey: string | null = null;
-  let compressFailCount = 0;
+  interface CompressOutcomeTracker {
+    seen: Set<string>;
+    failTurnKey: string | null;
+    failCount: number;
+  }
+  const compressOutcomes = new Map<string, CompressOutcomeTracker>();
+  function compressTrackerFor(sid: string): CompressOutcomeTracker {
+    let t = compressOutcomes.get(sid);
+    if (!t) { t = { seen: new Set(), failTurnKey: null, failCount: 0 }; compressOutcomes.set(sid, t); }
+    return t;
+  }
 
-  function noteCompressOutcomes(turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean }>): { count: number; cappedNow: boolean } {
-    if (compressFailTurnKey !== turnKey) {
-      compressFailTurnKey = turnKey;
-      compressFailCount = 0;
+  function noteCompressOutcomes(sid: string, turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean }>): { count: number; cappedNow: boolean } {
+    const t = compressTrackerFor(sid);
+    if (t.failTurnKey !== turnKey) {
+      t.failTurnKey = turnKey;
+      t.failCount = 0;
     }
-    const prevCount = compressFailCount;
+    const prevCount = t.failCount;
     for (const o of outcomes) {
-      if (compressOutcomeSeen.has(o.toolCallId)) continue;
-      compressOutcomeSeen.add(o.toolCallId);
+      if (t.seen.has(o.toolCallId)) continue;
+      t.seen.add(o.toolCallId);
       if (o.isError || o.noop === true) {
-        compressFailCount += 1;
+        t.failCount += 1;
       } else if (o.success) {
-        compressFailCount = 0;
+        t.failCount = 0;
       }
       // neutral: counter untouched
     }
-    const cappedNow = compressFailCount >= MAX_COMPRESS_ATTEMPTS && prevCount < MAX_COMPRESS_ATTEMPTS;
-    return { count: compressFailCount, cappedNow };
+    const cappedNow = t.failCount >= MAX_COMPRESS_ATTEMPTS && prevCount < MAX_COMPRESS_ATTEMPTS;
+    return { count: t.failCount, cappedNow };
   }
 
-  function compressRetryCappedFor(turnKey: string): boolean {
-    return compressFailTurnKey === turnKey && compressFailCount >= MAX_COMPRESS_ATTEMPTS;
+  function compressRetryCappedFor(sid: string, turnKey: string): boolean {
+    const t = compressOutcomes.get(sid);
+    return t !== undefined && t.failTurnKey === turnKey && t.failCount >= MAX_COMPRESS_ATTEMPTS;
   }
 
-  function clearCompressRetryTracking(): void {
-    compressOutcomeSeen.clear();
-    compressFailTurnKey = null;
-    compressFailCount = 0;
+  function clearCompressRetryTracking(sid: string): void {
+    compressOutcomes.delete(sid);
   }
 
   async function acquireLock(sid: string): Promise<() => void> {
@@ -467,4 +498,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
 
   let refused = false;
   let refusalMessage: string | null = null;
-  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k, t) => { nudgeShownTurns.add(k); if (t !== undefined) nudgeShownTokens.set(k, t); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), nudgeShownTokensFor: (k) => nudgeShownTokens.get(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); nudgeShownTokens.clear(); }, clearNudgeTokenStamps: () => nudgeShownTokens.clear(), noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale };}
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale };}
