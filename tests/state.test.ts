@@ -249,6 +249,51 @@ test("no parentSession in header → fresh state even with empty blocks", async 
   await rm(dir, { recursive: true, force: true });
 });
 
+// issue #322: file-less (in-memory) sessions — pi-subagents SessionManager.inMemory()
+// with rememberAgents:false → getSessionFile() === undefined. save() used to return
+// before updating the in-process cache, so every successful compress was dropped and
+// the next turn reloaded the pristine initial state (blocks=0, nextBlockId=1).
+test("in-memory session: save then load round-trips state without a session file", async () => {
+  const store = new SessionStateStore();
+  const initial = await store.load(undefined, "in-memory-sid");
+  assert.equal(initial.blocks.length, 0);
+  assert.equal(initial.nextBlockId, 1);
+
+  const compressed = { ...initial };
+  compressed.blocks.push(makeBlock("b1"));
+  compressed.nextBlockId = 2;
+
+  await store.save(compressed, undefined, "in-memory-sid");
+  const reloaded = await store.load(undefined, "in-memory-sid");
+
+  assert.equal(reloaded.blocks.length, 1);
+  assert.equal(reloaded.blocks[0]!.blockId, "b1");
+  assert.equal(reloaded.nextBlockId, 2, "nextBlockId must not reset across reloads");
+});
+
+test("in-memory sessions: distinct sessionIds stay isolated", async () => {
+  const store = new SessionStateStore();
+  const stateA = await store.load(undefined, "sid-A");
+  const stateB = await store.load(undefined, "sid-B");
+
+  const updatedA = { ...stateA };
+  updatedA.blocks.push(makeBlock("bA"));
+  updatedA.nextBlockId = 2;
+  const updatedB = { ...stateB };
+  updatedB.blocks.push(makeBlock("bB"));
+  updatedB.nextBlockId = 3;
+
+  await store.save(updatedA, undefined, "sid-A");
+  await store.save(updatedB, undefined, "sid-B");
+
+  const reA = await store.load(undefined, "sid-A");
+  const reB = await store.load(undefined, "sid-B");
+  assert.deepEqual(reA.blocks.map((b) => b.blockId), ["bA"]);
+  assert.deepEqual(reB.blocks.map((b) => b.blockId), ["bB"]);
+  assert.equal(reA.nextBlockId, 2);
+  assert.equal(reB.nextBlockId, 3);
+});
+
 test("live ref origins remain isolated across interleaved sessions", async () => {
   const dir = await tempDir();
   const fileA = path.join(dir, "a.session.json");

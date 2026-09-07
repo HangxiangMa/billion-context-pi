@@ -156,3 +156,49 @@ test("compress normalizes double-escaped \\uXXXX summaries before storage", asyn
   assert.ok(block.summary.includes("合".repeat(25)), "stored summary must contain decoded CJK");
   assert.ok(!block.summary.includes("\\u5408"), "stored summary must not contain literal \\uXXXX runs");
 });
+
+// issue #322: in-memory subagent sessions (pi-subagents rememberAgents:false →
+// SessionManager.inMemory()) have getSessionFile() === undefined. A successful
+// compress must stay visible to the NEXT context round; before the fix save()
+// returned before updating the in-process cache, so every turn reloaded the
+// pristine initial state and the model re-compressed the same original context.
+test("compress in an in-memory session (no session file) survives to the next context round", async () => {
+  const { api, handlers } = captureApi();
+  // minCompressRange gate needs ≥5000 chars per range; each entry carries 6000
+  // CJK chars, and preserveRecentMessages:1 keeps both targets outside the
+  // protected trailing zones (same pattern as the #309 test).
+  createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
+  const BIG = "中".repeat(6000);
+  const entries = [userMsg("e1", BIG), userMsg("e2", BIG), userMsg("e3", BIG), userMsg("e4", BIG)];
+  const ctx = fakeCtx(entries, undefined);
+  ctx.__setUsage(100_000);
+  await runContextRound(handlers, ctx); // prime refs
+
+  const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+  const statusTool = api.tools.find((t: any) => t.name === "acp_status")!;
+  async function doCompress(callId: string, range: { startId: string; endId: string; summary: string }) {
+    const out = await compressTool.execute(callId, { content: [range] }, undefined, undefined, ctx);
+    return typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
+  }
+  async function statusText() {
+    const out = await statusTool.execute("st1", { scope: "compressed" }, undefined, undefined, ctx);
+    return typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
+  }
+
+  const first = await doCompress("tc1", { startId: "m00001", endId: "m00001", summary: "first block: initial context round compressed for the in-memory session test" });
+  assert.ok(first.includes("▣ ACP"), `first compress failed: ${first}`);
+  assert.ok(!first.includes("Errors:"), `first compress rejected: ${first}`);
+
+  await runContextRound(handlers, ctx); // next turn — the bug lost state here
+
+  let report = await statusText();
+  assert.match(report, /b1 \(T1\)/, `next round must still show block b1: ${report}`);
+
+  const second = await doCompress("tc2", { startId: "m00002", endId: "m00002", summary: "second block: follow-up context round compressed for the in-memory session test" });
+  assert.ok(second.includes("▣ ACP"), `second compress failed: ${second}`);
+  assert.ok(!second.includes("Errors:"), `second compress rejected: ${second}`);
+
+  report = await statusText();
+  assert.match(report, /b1 \(T1\)/, `b1 must survive after the second compress: ${report}`);
+  assert.match(report, /b2 \(T1\)/, `second block must be numbered b2 (nextBlockId retained), not reset to b1: ${report}`);
+});
