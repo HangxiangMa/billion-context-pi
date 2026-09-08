@@ -10,6 +10,7 @@ const { makeCommands } = await import("../src/commands.js");
 
 function fakeRuntime(): AcpRuntime {
   return {
+    adapter: {},
     configFor: () => ({ modelContextLimit: 1_000_000 }),
     stateFor: async () => ({
       state: { blocks: [], stats: { tokensCompressed: 0 }, messageRefs: { byRaw: {}, byRef: {} } },
@@ -43,7 +44,7 @@ test("/acp panel (kit-rendered) separates session accounting from sent view", as
   await acp.options.handler!("", ctx);
 
   const text = notified[0] ?? "";
-  assert.match(text, /Context \(session accounting, host footer scale\): 43% \(430k \/ 1\.0M\) — never shrinks/, text);
+  assert.match(text, /Context \(session accounting, host footer scale\): 43% \(430k \/ 1\.0M\) — includes compressed originals; shrinks slower than the sent view/, text);
   assert.match(text, /Sent to LLM \(after compression, est\.\): 24k \(2% of limit\)/, text);
   // unprunedTokens is passed from the same projection — Session-only derives
   // on the estimation scale (issue #18), never 430k − 24k cross-scale.

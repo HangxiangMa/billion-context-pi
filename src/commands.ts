@@ -3,10 +3,13 @@ import type { AcpRuntime } from "./runtime.js";
 import { ACP_STATUS_CUSTOM_TYPE } from "./messages.js";
 import { defaultCountTokens, parseBlockIdArg, collectBlockContent } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
-import { collectCoveredMessageIds, estimateTokens, collectImageTokens, modelSupportsImages } from "./tokens.js";
+import { collectCoveredMessageIds, estimateTokens, collectImageTokens, modelSupportsImages, adjustedTokenCount } from "./tokens.js";
 import { usageAnchorPredatesCompression } from "./floor-stale.js";
+import { applyOutputHeadroom, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
 import { buildStatusPanel } from "acp-kernel/panel";
 import { getDelegateUsage } from "./delegate-tool.js";
+import { openFleetInspector } from "./fleet-inspector.js";
+import { resolveDelegate } from "./config.js";
 import { ensureSubagentAcpTools } from "./setup-subagent-tools.js";
 
 declare const CURRENT_VERSION: string;
@@ -122,12 +125,28 @@ export function makeCommands(runtime: AcpRuntime, pi?: ExtensionAPI): Array<{ na
         },
       },
     },
+    {
+      name: "acp-fleet",
+      options: {
+        description: "Inspect acp_delegate sub-agent runs: live list + transcript overlay (TUI), text snapshot elsewhere.",
+        handler: async (_args, ctx) => {
+          if (!resolveDelegate(runtime.adapter).enabled) {
+            ctx.ui.notify("acp_delegate is not enabled in this session's config.");
+            return;
+          }
+          await openFleetInspector(ctx);
+        },
+      },
+    },
   ];
 }
 
 async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): Promise<string> {
   const { state, coreMessages, entries } = await runtime.stateFor(ctx);
-  const config = runtime.configFor(ctx);
+  // Measure every panel percentage against the SAME real request limit the live
+  // context transform uses (window − output headroom), not the full window
+  // (issue #267).
+  const config = applyOutputHeadroom(runtime.configFor(ctx), ctx.model, resolveOutputHeadroomCap(runtime.adapter.outputHeadroomMaxPct));
   // Use pi's real context usage (anchored on provider usage) only for the
   // panel's footer-scale display line; see sentTokens below for arbitration.
   const realUsage = ctx.getContextUsage?.();
@@ -143,9 +162,13 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   const sessionTokens = !anchorStale && realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : defaultCountTokens(coreMessages.map((m) => m.text ?? "").join("\n")) + imageTokensTotal;
   const coveredIds = collectCoveredMessageIds(state);
   const sentTokens = estimateTokens(coreMessages, coveredIds, imageTokens) + systemPromptTokens;
+  // View-based recount (issue #289): with active blocks the raw-view estimate
+  // can sit far above the sent view and mis-scale the panel's nudge — same
+  // arbitration as src/index.ts and acp_status.
+  const viewSentTokens = adjustedTokenCount(runtime.core, coreMessages, state, config, sentTokens, imageTokens, systemPromptTokens);
   // issue #257: floor the meter at the host's real context usage so the
   // panel's nudge matches the real decision (same as src/index.ts).
-  const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount: anchorStale ? sentTokens : Math.max(sentTokens, realUsage?.tokens ?? 0) });
+  const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount: anchorStale ? viewSentTokens : Math.max(viewSentTokens, realUsage?.tokens ?? 0) });
 
   // Shared kit surface renders the panel (dual accounting, viability
   // filtering, bars, block list with topic fallback). Host-specific inputs:

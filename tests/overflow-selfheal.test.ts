@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { inspectOverflowMessage, OverflowEpisode, OVERFLOW_MARKER, reserveOutputHeadroom, shouldReserveOutputHeadroom } from "../src/overflow-selfheal.js";
+import { inspectOverflowMessage, OverflowEpisode, OVERFLOW_MARKER, reserveOutputHeadroom, shouldReserveOutputHeadroom, applyOutputHeadroom, resolveOutputHeadroomCap, DEFAULT_OUTPUT_HEADROOM_MAX_PCT } from "../src/overflow-selfheal.js";
 
 test("inspectOverflowMessage: detects OpenAI context-overflow + parses window", () => {
   const info = inspectOverflowMessage(
@@ -197,4 +197,24 @@ test("shouldReserveOutputHeadroom: anthropic-messages exempt, other APIs reserve
   assert.equal(shouldReserveOutputHeadroom("google"), true);
   assert.equal(shouldReserveOutputHeadroom("bedrock-converse-stream"), true, "conservative for uncertain APIs");
   assert.equal(shouldReserveOutputHeadroom(undefined), true, "unknown api → conservative (reserve)");
+});
+
+test("applyOutputHeadroom: threads the cap through to reserveOutputHeadroom", () => {
+  const config = { modelContextLimit: 262_144 };
+  const model = { maxTokens: 131_072, api: "openai-completions" };
+  assert.equal(applyOutputHeadroom(config, model, 0.25).modelContextLimit, 196_608, "capped reservation (qwen3.8-27b issue #207)");
+  assert.equal(applyOutputHeadroom(config, model, 1).modelContextLimit, 131_072, "cap 1 = legacy full reservation");
+  assert.equal(applyOutputHeadroom(config, model).modelContextLimit, 131_072, "no cap arg = legacy for old call sites");
+  assert.equal(applyOutputHeadroom(config, model, 0).modelContextLimit, 262_144, "cap 0 disables the reservation");
+  assert.equal(applyOutputHeadroom(config, { maxTokens: 131_072, api: "anthropic-messages" }, 0.25).modelContextLimit, 262_144, "anthropic exempt even with a cap");
+  assert.equal(applyOutputHeadroom(config, undefined, 0.25).modelContextLimit, 262_144, "no model → no reservation");
+  assert.equal(config.modelContextLimit, 262_144, "input config never mutated");
+});
+
+test("resolveOutputHeadroomCap: unset → default, ratio/percent passthrough", () => {
+  assert.equal(resolveOutputHeadroomCap(undefined), DEFAULT_OUTPUT_HEADROOM_MAX_PCT, "unset → 0.25 default");
+  assert.equal(resolveOutputHeadroomCap(0.5), 0.5, "ratio passthrough");
+  assert.equal(resolveOutputHeadroomCap("25%"), 0.25, "percent string");
+  assert.equal(resolveOutputHeadroomCap(0), 0, "0 stays 0 (disable)");
+  assert.equal(resolveOutputHeadroomCap(1), 1, "1 = legacy full reservation");
 });

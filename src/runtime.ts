@@ -11,6 +11,7 @@ import {
 import { resolveConfig, type AdapterConfig } from "./config.js";
 import { entriesToCoreMessages, extractText, matchesStoredText, messageIdentity, messageRef } from "./messages.js";
 import { SessionStateStore, type LiveRefOrigin } from "./state.js";
+import { hasCompressHistory, rebuildStateFromLog } from "./state-rebuild.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
 import { ThrottleEpisode } from "./throttle-retry.js";
 import { logInfo, logWarn, setDebugEnabled } from "./log.js";
@@ -40,11 +41,15 @@ export function isPiHost(sm: ExtensionContext["sessionManager"]): boolean {
 
 export interface AcpRuntime {
   core: CompressionCore;
-  /** Set when the host is unsupported (currently: OMP / oh-my-pi). Once true,
-   *  the extension stands down: the context transform, system-prompt injection,
-   *  compaction-cancel and ACP tools all no-op so the host runs untouched.
-   *  Set at session_start (see wireOmpRefusal in src/index.ts). */
+  /** Set when the host is unsupported (currently: OMP / oh-my-pi) or when the
+   *  model's baseUrl routes through the billion-context wire proxy (#296).
+   *  Once true, the extension stands down: the context transform, system-prompt
+   *  injection, compaction-cancel and ACP tools all no-op so the host runs
+   *  untouched. Set at session_start (first context event as fallback). */
   refused: boolean;
+  /** User-facing reason shown when a refused ACP tool is invoked; null means
+   *  the default OMP refusal text applies. Set together with `refused`. */
+  refusalMessage: string | null;
   /** Per-session provider-throttle retry episode (attempt budget + kick
    *  pacing), keyed by session id so concurrent sessions in one extension
    *  instance cannot share an episode. Reset on session_start and on any
@@ -54,13 +59,24 @@ export interface AcpRuntime {
    *  pending kick sleep and releases the map entry so a long-lived process
    *  that cycles through many sessions doesn't accumulate them. */
   throttleDrop: (sid: string) => void;
+  /** Per-session tokenCount scale tracker (estimate vs provider). Returns true
+   *  when the scale just flipped (stale↔not-stale) so the caller can reset the
+   *  growth baseline — a cross-scale delta is a false artifact, not real growth
+   *  (issue #267). The first observation for a session never reports a flip. */
+  noteTokenScale: (sid: string, stale: boolean) => boolean;
+  /** Drop a session's token-scale tracker (session_shutdown). */
+  dropTokenScale: (sid: string) => void;
   store: SessionStateStore;
   adapter: AdapterConfig;
   setAdapter(adapter: AdapterConfig): void;
   prompts: Prompts;
   setPrompts(prompts: Prompts): void;
-  markNudgeShown(turnKey: string): void;
+  markNudgeShown(turnKey: string, tokenCount?: number): void;
   nudgeShownFor(turnKey: string): boolean;
+  /** tokenCount at the last actual nudge injection for this turn, for growth-aware re-inject (issue #269). */
+  nudgeShownTokensFor(turnKey: string): number | undefined;
+  /** Clears the token-count stamps recorded by markNudgeShown — used on a token-scale flip (issue #267) so the same-turn re-inject floor (#269 / PR #316) is not computed against an old-scale stamp. */
+  clearNudgeTokenStamps(): void;
   /** Process compress toolResults for the CURRENT user turn only (the caller
    *  scopes the list — see collectCompressOutcomes in src/index.ts); idempotent
    *  per toolCallId. Outcome classes: isError or noop (0-block panel) →
@@ -252,6 +268,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   let lastUserConfigKey: string | undefined;
   let promptsRef: Prompts = defaultPrompts;
   const nudgeShownTurns = new Set<string>();
+  const nudgeShownTokens = new Map<string, number>();
   // Per-session overflow self-heal state (learned window + armed emergency).
   const overflowEpisodes = new Map<string, OverflowEpisode>();
   function overflowFor(sid: string): OverflowEpisode {
@@ -285,6 +302,19 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     const ep = throttleEpisodes.get(sid);
     if (ep) ep.reset(); // abort a pending kick sleep before releasing the entry
     throttleEpisodes.delete(sid);
+  }
+
+  // Per-session tokenCount scale (estimate vs provider). When the anchor flips
+  // stale↔not-stale the meter switches rulers; a growth delta spanning that
+  // switch is a false artifact (issue #267), so the caller resets the baseline.
+  const tokenScaleStale = new Map<string, boolean>();
+  function noteTokenScale(sid: string, stale: boolean): boolean {
+    const prev = tokenScaleStale.get(sid);
+    tokenScaleStale.set(sid, stale);
+    return prev !== undefined && prev !== stale;
+  }
+  function dropTokenScale(sid: string): void {
+    tokenScaleStale.delete(sid);
   }
 
   // Compress-failure tracking (see wireContextTransform): counts FAILED/no-op
@@ -377,8 +407,29 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     const sm = ctx.sessionManager;
     const sessionFile = sm.getSessionFile() ?? undefined;
     const sessionId = sm.getSessionId();
-    const state = await store.load(sessionFile, sessionId);
+    let state = await store.load(sessionFile, sessionId);
     const entries = readContextEntries(sm);
+    // Issue #299 (ranxianglei/billion-context-pi#299): pi's importFromJsonl
+    // copies only the .jsonl, so the `${sessionFile}.acp.json` sidecar never
+    // travels with an imported session and compression state silently resets
+    // (the adapter then re-compresses already-compressed content). Last resort
+    // after the sidecar and parent-session inheritance both miss: replay the
+    // successful compress calls recorded in the session log itself. Uses only
+    // persisted entries — the omp live tail is not part of history yet.
+    if (sessionFile && state.blocks.length === 0 && hasCompressHistory(entries)) {
+      const rebuilt = rebuildStateFromLog({ entries, state, config: configFor(ctx), core });
+      if (rebuilt.report.blocks > 0) {
+        state = rebuilt.state;
+        await store.save(state, sessionFile, sessionId);
+        logInfo("state", {
+          sid: sessionId,
+          event: "state-rebuilt",
+          blocks: rebuilt.report.blocks,
+          callsApplied: rebuilt.report.callsApplied,
+          callsSkipped: rebuilt.report.callsSkipped,
+        });
+      }
+    }
     // omp fires the context event BEFORE the current user message is persisted
     // to the session branch (its agent-loop emits message_end only after
     // prepareProviderCall → transformContext), so getBranch() lags one message
@@ -405,4 +456,5 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   }
 
   let refused = false;
-  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop };}
+  let refusalMessage: string | null = null;
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k, t) => { nudgeShownTurns.add(k); if (t !== undefined) nudgeShownTokens.set(k, t); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), nudgeShownTokensFor: (k) => nudgeShownTokens.get(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); nudgeShownTokens.clear(); }, clearNudgeTokenStamps: () => nudgeShownTokens.clear(), noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale };}

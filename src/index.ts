@@ -10,20 +10,21 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
 import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges } from "acp-kernel";
-import { type AdapterConfig, resolveDelegate, parsePercent } from "./config.js";
+import { type AdapterConfig, resolveDelegate, DEFAULT_DELEGATE_POLICY } from "./config.js";
 import { createRuntime, type AcpRuntime } from "./runtime.js";
 import { makeCompressTool, isCompressSuccessText, isCompressNoopText } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
-import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage } from "./delegate-tool.js";
+import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage, setDelegatePolicy, setDelegateDefaults, setDelegateNotifyIfRead, markDelegateResultRead, markDelegateRunReadByCommand } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages, extractText } from "./messages.js";
 import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
+import { openFleetInspector } from "./fleet-inspector.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
-import { collectCoveredMessageIds, estimateTokens, lastUserMessageId, collectImageTokens, modelSupportsImages } from "./tokens.js";
+import { collectCoveredMessageIds, estimateTokens, lastUserMessageId, collectImageTokens, modelSupportsImages, sentViewTokenCount } from "./tokens.js";
 import { usageAnchorPredatesCompression } from "./floor-stale.js";
 import { checkForUpdate } from "./update.js";
 import {
@@ -37,8 +38,9 @@ import {
 } from "./throttle-retry.js";
 import { defaultCountTokens } from "acp-kernel";
 import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
-import { DEFAULT_OUTPUT_HEADROOM_MAX_PCT, inspectOverflowMessage, reserveOutputHeadroom, shouldReserveOutputHeadroom } from "./overflow-selfheal.js";
+import { applyOutputHeadroom, inspectOverflowMessage, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
 import { isOmpHost, OMP_UNSUPPORTED_MESSAGE } from "./omp.js";
+import { isBiliProxyBaseUrl, PROXY_STAND_DOWN_MESSAGE } from "./proxy-detect.js";
 
 type AgentMessage = SessionMessageEntry["message"];
 
@@ -55,9 +57,31 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
       return;
     }
     const runtime = createRuntime(adapter);
+    // Manual-wiring double-compression guard (issue #296): the launcher path
+    // exports BILLION_CONTEXT_PROXY (checked above), but a user who starts the
+    // proxy standalone (`bili start`) and points models.json baseUrl at
+    // http://127.0.0.1:PORT/bili/<scheme>://upstream... never sets the env var —
+    // without this check bcp and the proxy both compress every request. Yields
+    // exactly like the env path: stand down, let the proxy own compression.
+    // Checked lazily because ctx.model only exists on events, not in the
+    // factory; warn once per process like the OMP refusal.
+    let proxyWarned = false;
+    const standDownIfProxied = (ctx: ExtensionContext): boolean => {
+      if (!isBiliProxyBaseUrl((ctx.model as { baseUrl?: string } | undefined)?.baseUrl)) return false;
+      runtime.refused = true;
+      runtime.refusalMessage = PROXY_STAND_DOWN_MESSAGE;
+      if (!proxyWarned) {
+        proxyWarned = true;
+        logWarn("host", { event: "proxy-baseurl-detected", sid: ctx.sessionManager.getSessionId(), action: "refused" });
+        if (ctx.hasUI) ctx.ui.notify(PROXY_STAND_DOWN_MESSAGE, "warning");
+        else console.error(PROXY_STAND_DOWN_MESSAGE);
+      }
+      return true;
+    };
     wireCompactionDisable(pi, runtime);
-    wireSessionLifecycle(pi, runtime);
-    wireContextTransform(pi, runtime);
+    wireDelegateReadTracking(pi);
+    wireSessionLifecycle(pi, runtime, standDownIfProxied);
+    wireContextTransform(pi, runtime, standDownIfProxied);
     wireSystemPrompt(pi, runtime);
     wireToolGuardrails(pi, runtime);
     wireOverflowSelfHeal(pi, runtime);
@@ -111,7 +135,25 @@ function wireCompactionDisable(pi: ExtensionAPI, runtime: AcpRuntime): void {
 // in pi, and interactive/rpc sessions are long-lived so their main loop
 // consumes the follow-up queue naturally — no shutdown drain needed.)
 
-function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
+// Read-tracking for delegate completion notifications (notifyIfRead: "skip"):
+// when the model reads a delegate's result file, mark the run as read so the
+// completion notification is skipped if the run finishes after that read.
+// Registered once per process; the runs registry is per-process, so delegate
+// child processes (nested delegates) track their own runs independently.
+function wireDelegateReadTracking(pi: ExtensionAPI): void {
+  pi.on("tool_result", (event) => {
+    if (event.isError) return;
+    if (event.toolName === "read") {
+      const p = (event.input as { path?: unknown }).path;
+      if (typeof p === "string") markDelegateResultRead(p);
+    } else if (event.toolName === "bash") {
+      const cmd = (event.input as { command?: unknown }).command;
+      if (typeof cmd === "string") markDelegateRunReadByCommand(cmd);
+    }
+  });
+}
+
+function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIfProxied: (ctx: ExtensionContext) => boolean): void {
   let ompWarned = false;
   pi.on("session_start", async (_event, ctx) => {
     // OMP (oh-my-pi) is not supported: its in-process live-entries integration
@@ -131,12 +173,14 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
       }
       return;
     }
+    if (standDownIfProxied(ctx)) return;
     runtime.store.invalidate();
     runtime.clearNudgeTracking();
     runtime.throttleFor(ctx.sessionManager.getSessionId()).reset();
     runtime.clearCompressRetryTracking();
     resetDelegateUsage();
     setDelegateDisplayUsage("separate");
+    setDelegatePolicy(DEFAULT_DELEGATE_POLICY);
     const sid = ctx.sessionManager.getSessionId();
     // Model identity on every session start: diagnosing "which model loops
     // on compress rejections" from user logs required cwd forensics — the log
@@ -146,7 +190,11 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
     logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null, model: modelInfo?.id ?? null, modelApi: modelInfo?.api ?? null, contextWindow: modelInfo?.contextWindow ?? null });
     try {
       await runtime.reloadConfig(ctx.cwd);
-      setDelegateDisplayUsage(resolveDelegate(runtime.adapter).displayUsage);
+      const delegateCfg = resolveDelegate(runtime.adapter);
+      setDelegateDisplayUsage(delegateCfg.displayUsage);
+      setDelegatePolicy(delegateCfg);
+      setDelegateDefaults({ thinkingLevel: delegateCfg.thinkingLevel, agents: delegateCfg.agents });
+      setDelegateNotifyIfRead(delegateCfg.notifyIfRead);
     } catch (e) {
       logThrow("config", e, { sid, phase: "session_start" });
     }
@@ -160,6 +208,14 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
       pi.registerTool(makeDelegateTool(pi));
       pi.registerTool(makeDelegateWaitTool(pi));
       pi.registerTool(makeDelegateCancelTool(pi));
+      // Not every host implements the full ExtensionAPI surface (older pi,
+      // embedded hosts) — shortcuts are a TUI nicety, never load-bearing.
+      if (typeof pi.registerShortcut === "function") {
+        pi.registerShortcut("ctrl+alt+f", {
+          description: "Inspect acp_delegate runs (live list + transcript)",
+          handler: (ctx) => { void openFleetInspector(ctx); },
+        });
+      }
     }
     // Headless hosts exit as soon as the turn ends; awaiting the check keeps
     // the process alive until a running install finishes. TUI stays
@@ -176,6 +232,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
   });
   pi.on("session_shutdown", (_event, ctx) => {
     runtime.clearDeadCompress(ctx.sessionManager.getSessionId());
+    runtime.dropTokenScale(ctx.sessionManager.getSessionId());
     delegateStatusWidget.dispose();
     closeLogStream();
   });
@@ -184,12 +241,15 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
 // The core integration: Pi's `context` event fires before every LLM call with the
 // messages about to be sent. We run acp-kernel's processTurn (prune + ref-tag +
 // nudge decision) and return the transformed AgentMessage[].
-function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
+function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIfProxied: (ctx: ExtensionContext) => boolean): void {
   pi.on("context", async (event, ctx) => {
-    // Refused host (OMP): leave the context completely untouched — no ref tags,
-    // no compression, no nudge. Returning undefined makes pi send the original
-    // messages verbatim.
+    // Refused host (OMP / proxied baseUrl): leave the context completely
+    // untouched — no ref tags, no compression, no nudge. Returning undefined
+    // makes pi send the original messages verbatim.
     if (runtime.refused) return;
+    // Fallback for hosts where session_start did not fire before the first LLM
+    // call: detect the proxied baseUrl here instead.
+    if (standDownIfProxied(ctx)) return;
     const sid = ctx.sessionManager.getSessionId();
     const release = await runtime.acquireLock(sid);
     try {
@@ -218,19 +278,12 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       // reserving the FULL registered maxTokens capability halves the input
       // budget on models whose maxTokens is a large share of the window.
       // Applied to the (possibly re-centered) window above; never mutates the
-      // shared config. Anthropic is exempt — its input limit is enforced
-      // independently of max_tokens (see shouldReserveOutputHeadroom).
-      const maxOutput = (ctx.model as { maxTokens?: number } | undefined)?.maxTokens ?? 0;
-      const rawHeadroomCap = runtime.adapter.outputHeadroomMaxPct;
-      const headroomCap = rawHeadroomCap === undefined ? DEFAULT_OUTPUT_HEADROOM_MAX_PCT : parsePercent(rawHeadroomCap);
-      let fullWindow = config.modelContextLimit;
-      if (shouldReserveOutputHeadroom((ctx.model as { api?: string } | undefined)?.api)) {
-        const reservedWindow = reserveOutputHeadroom(config.modelContextLimit, maxOutput, headroomCap);
-        if (reservedWindow !== config.modelContextLimit) {
-          const before = config.modelContextLimit;
-          config = { ...config, modelContextLimit: reservedWindow };
-          logInfo("overflow-selfheal", { sid, event: "output-headroom", before, after: reservedWindow, maxOutput, cap: headroomCap });
-        }
+      // shared config. Anthropic is exempt (see applyOutputHeadroom).
+      const headroomCap = resolveOutputHeadroomCap(runtime.adapter.outputHeadroomMaxPct);
+      const fullWindow = config.modelContextLimit;
+      config = applyOutputHeadroom(config, ctx.model, headroomCap);
+      if (config.modelContextLimit !== fullWindow) {
+        logInfo("overflow-selfheal", { sid, event: "output-headroom", before: fullWindow, after: config.modelContextLimit, maxOutput: (ctx.model as { maxTokens?: number } | undefined)?.maxTokens ?? 0, cap: headroomCap });
       }
       const coveredIds = collectCoveredMessageIds(state);
       // Nudge arbitration on the SENT-VIEW scale: CJK-aware estimate over the
@@ -241,31 +294,57 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       const realUsage = ctx.getContextUsage?.();
       const systemPromptText = getSystemPromptText(ctx);
       const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
-      const sentTokens = estimateTokens(coreMessages, coveredIds, collectImageTokens(entries, modelSupportsImages(ctx.model))) + systemPromptTokens;
-      // Usage/emergency arbitration on the sent view, floored at the host's
-      // real context usage (issue #257): the CJK-aware base estimate is still
-      // a heuristic (images, mixed content, per-model tokenizer drift), so
-      // the 0.75/0.95 bands run on the real scale via the floor. realUsage is
-      // anchored on the last assistant's provider-reported usage + trailing
-      // estimate. Only ever raises (never lowers); skipped while the anchor
-      // predates a successful compress (floor-stale.ts). tokenCount only
-      // feeds processTurn.
-      let tokenCount = sentTokens;
-      const realPromptTokens = realUsage?.tokens ?? 0;
-      if (!usageAnchorPredatesCompression(entries) && realPromptTokens > tokenCount) {
-        tokenCount = realPromptTokens;
-      }
-      // Self-heal (armed): after an overflow, force this turn's usage to >=95%
-      // so the kernel's emergency nudge + tool-result truncate fire immediately,
-      // even if the estimate under-reports the sent view. tokenCount only feeds
-      // processTurn (nudge/truncate).
+      const imageTokens = collectImageTokens(entries, modelSupportsImages(ctx.model));
+      const sentTokens = estimateTokens(coreMessages, coveredIds, imageTokens) + systemPromptTokens;
+      // Floors (raise-only, applied to whichever base wins below): the host's
+      // real context usage (issue #257/#258 — anchored on the last assistant's
+      // provider-reported usage + trailing estimate; skipped while the anchor
+      // predates a successful compress, floor-stale.ts) and the armed self-heal
+      // 95% floor after an upstream overflow. Captured once so both bases see
+      // identical floors; ov.armed is consumed exactly once either way.
+      let armedFloor = 0;
       if (ov.armed && config.modelContextLimit > 0) {
         ov.armed = false;
-        const floor = Math.floor(config.modelContextLimit * 0.95);
-        if (floor > tokenCount) {
-          tokenCount = floor;
-          logWarn("overflow-selfheal", { sid, event: "armed-emergency", tokenCount, limit: config.modelContextLimit });
+        armedFloor = Math.floor(config.modelContextLimit * 0.95);
+        logWarn("overflow-selfheal", { sid, event: "armed-emergency", floor: armedFloor, limit: config.modelContextLimit });
+      }
+      const hostFloorActive = !usageAnchorPredatesCompression(entries);
+      const realPromptTokens = realUsage?.tokens ?? 0;
+      const applyFloors = (base: number): number => Math.max(base, hostFloorActive ? realPromptTokens : 0, armedFloor);
+      let tokenCount = applyFloors(sentTokens);
+      // View-based recount (issue #289): the raw-view estimate counts uncovered
+      // messages that prune strips from the sent view every turn (orphaned tool
+      // pairs straddling block boundaries, absorbed/filtered messages) — in long
+      // multi-block sessions that pins tokenCount far above reality, holding
+      // usage in the emergency band and driving low/zero-yield compression loops.
+      // Re-measure on the actual post-processTurn view and adopt it when the two
+      // diverge beyond noise (the probe runs on a clone; see sentViewTokenCount).
+      if (state.blocks.some((b) => b.active && b.effectiveMessageIds.length > 0)) {
+        const view = sentViewTokenCount(runtime.core, coreMessages, state, config, tokenCount, imageTokens, systemPromptTokens);
+        if (view.drifted) {
+          tokenCount = applyFloors(view.viewTokens);
+          logInfo("turn", { sid, event: "view-recount", prelim: sentTokens, viewTokens: view.viewTokens, tokenCount });
         }
+      }
+      // Growth scale guard (issue #267): the meter switches rulers when the
+      // anchor flips stale↔not-stale (estimate ↔ provider). A growth delta
+      // spanning that switch is a false artifact, not real growth, so reset the
+      // growth baselines on the flip: the T1 growth reference (lastNudgeShownTokens
+      // / lastPerMessageNudgeTokens) AND the per-tier cadence baselines
+      // (lastShownByTier, kernel 0.0.55: cadence = tokenCount - lastShownByTier[t]
+      // >= growthFloor) — an old-scale lastShown subtracted from a new-scale
+      // tokenCount is exactly the false "+35k growth" artifact from the issue.
+      // The extension-side re-inject stamps (#269 / PR #316) are reset too:
+      // growth for the same-turn re-inject is tokenCount - nudgeShownTokensFor(turnKey)
+      // and an old-scale stamp would fake a full-floor growth after the flip.
+      // The usage bands above keep the floor-stale behavior untouched — only
+      // the growth references are re-anchored.
+      if (runtime.noteTokenScale(sid, !hostFloorActive)) {
+        state.nudge.lastNudgeShownTokens = 0;
+        state.nudge.lastPerMessageNudgeTokens = 0;
+        state.nudge.lastShownByTier = {};
+        runtime.clearNudgeTokenStamps();
+        logInfo("growth-scale", { sid, event: "scale-flip-reset", anchorStale: !hostFloorActive });
       }
       debug.event("context-in", {
         sid,
@@ -289,13 +368,18 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
         inMsgs: coreMessages.length,
         outMsgs: turn.messages.length,
         tokens: tokenCount,
-        pct: realUsage?.percent ?? (config.modelContextLimit > 0 ? Math.round((tokenCount / config.modelContextLimit) * 100) : null),
+        pct: config.modelContextLimit > 0 ? Number(((tokenCount / config.modelContextLimit) * 100).toFixed(2)) : null,
         limit: config.modelContextLimit,
         ...(fullWindow !== config.modelContextLimit ? { fullWindow } : {}),
         nudge: turn.nudge?.shouldInject ? (turn.nudge.breakdown?.emergencyOverride === 1 ? "emergency" : "active") : "idle",
         nudgeReason: turn.nudge?.reason ?? null,
         blocks: turn.state.blocks.length,
         activeBlocks: turn.state.blocks.filter((b) => b.active).length,
+        // #289: host-reported usage (Pi window scale) logged separately so
+        // tokens/pct above stay on one scale; field order after activeBlocks
+        // keeps the pre-existing [turn] layout stable for log consumers.
+        hostTokens: realUsage?.tokens ?? null,
+        hostPct: realUsage?.percent ?? null,
       });
       debug.event("processTurn", {
         modelId,
@@ -333,6 +417,33 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
     const compressOutcomes = collectCompressOutcomes(entries, turnStartIndex(entries));
     const outcome = compressOutcomes.length > 0 ? runtime.noteCompressOutcomes(turnKey, compressOutcomes) : null;
 
+    // Growth-aware re-inject bookkeeping (issue #269) runs on EVERY context
+    // event, not only when the kernel wants to inject: the drop re-anchor
+    // must advance even on idle events (post-compress collapse), or the
+    // baseline would keep pointing at the pre-compress peak and suppress the
+    // next pressure nudge straight into the emergency band.
+    // Floor mirrors the kernel's decideNudge cadence inputs (config carries
+    // kernel defaults via defaultConfig, so unset fields are the kernel's own):
+    //   nudgeGrowthTokens = min(growthCap, max(growthFloor, limit × growthRatio))
+    //   floor = max(minGrowthFloor, minGrowthRatio × nudgeGrowthTokens)
+    const adaptiveGrowth =
+      !config.modelContextLimit || config.modelContextLimit <= 0
+        ? config.nudge.growthFloor
+        : Math.min(
+            config.nudge.growthCap,
+            Math.max(config.nudge.growthFloor, Math.round(config.modelContextLimit * config.nudge.growthRatio)),
+          );
+    const reInjectFloor = Math.max(config.nudge.minGrowthFloor, config.nudge.minGrowthRatio * adaptiveGrowth);
+    let shownAt = runtime.nudgeShownTokensFor(turnKey);
+    if (shownAt !== undefined && tokenCount < shownAt - adaptiveGrowth) {
+      // Mirror the kernel's drop re-anchor (nudgeNode): after a successful
+      // compress the meter collapses; growth since the last shown must
+      // restart from the new baseline, not from the old peak.
+      logInfo("nudge", { sid: ctx.sessionManager.getSessionId(), event: "drop-reanchor", turnKey, from: shownAt, to: tokenCount });
+      shownAt = tokenCount;
+      runtime.markNudgeShown(turnKey, tokenCount);
+    }
+
     if (turn.nudge?.shouldInject) {
       // Two independent channels for the nudge:
       //  1. CONTEXT injection (always on): the nudge is appended to the
@@ -342,11 +453,21 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       //  2. TERMINAL echo (debug only): when debug is on, also print the exact
       //     text via ctx.ui.notify so the user can observe what is being
       //     injected while debugging. The model never sees terminal output.
-      // Emergency nudges (usage >= 80%) bypass the per-turn dedup so the
+      // Emergency nudges (usage >= 95%) bypass the per-turn dedup so the
       // overflow warning always reaches the model. Other nudges inject at most
       // once per turn: pi fires the context event multiple times per assistant
       // reply (streaming/tool loop), and without this gate the same nudge
-      // would be appended on every event.
+      // would be appended on every event. Exception (issue #269): once the
+      // context has GROWN by a full growth floor since the last actual
+      // injection, the nudge is allowed to re-inject within the same turn — a
+      // model that ignored the earlier nudge gets a fresh reminder on the new
+      // growth instead of being driven into the emergency band first. The
+      // floor mirrors the kernel's own anti-thrashing cadence (decideNudge:
+      // growthFloor = max(minGrowthFloor, minGrowthRatio × nudgeGrowthTokens),
+      // nudgeGrowthTokens = resolveAdaptiveGrowth — acp-kernel), so the
+      // re-inject never fires more eagerly than the kernel's growth-branch
+      // cadence and merely extends it to the pressure branch (75%+), which the
+      // kernel re-decides on every event by design.
       const emergency = turn.nudge.breakdown?.emergencyOverride === 1;
       // Recommend only ranges the model can actually compress: a tiny
       // fragmented range in the list makes batched attempts fail atomically
@@ -359,7 +480,8 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       // MAX_COMPRESS_ATTEMPTS attempts, stop re-injecting the nudge — the
       // kernel's emergency truncation still shrinks context mechanically.
       const retryCapped = runtime.compressRetryCappedFor(turnKey);
-      const alreadyShown = retryCapped || (!emergency && runtime.nudgeShownFor(turnKey));
+      const reInjectReady = shownAt === undefined || tokenCount - shownAt >= reInjectFloor;
+      const alreadyShown = retryCapped || (!emergency && runtime.nudgeShownFor(turnKey) && !reInjectReady);
       if (!alreadyShown) {
         rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active), runtime.prompts));
         const rendered = renderNudgeText(turn.nudge, runtime.prompts);
@@ -371,10 +493,10 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
         if (debugOn && ctx.hasUI) {
           ctx.ui.notify(`[ACP nudge → context]${emergency ? " [EMERGENCY]" : ""}\n${rendered.text}${example}`);
         }
-        if (!emergency) runtime.markNudgeShown(turnKey);
-        debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channels: ["context", debugOn ? "terminal" : null].filter(Boolean), emergency, turnKey, text: rendered.text + example });
+        if (!emergency) runtime.markNudgeShown(turnKey, tokenCount);
+        debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channels: ["context", debugOn ? "terminal" : null].filter(Boolean), emergency, turnKey, reInject: shownAt !== undefined, text: rendered.text + example });
       } else {
-        debug.event("nudge-suppressed", { sid: ctx.sessionManager.getSessionId(), turnKey, reason: turn.nudge.reason });
+        debug.event("nudge-suppressed", { sid: ctx.sessionManager.getSessionId(), turnKey, reason: turn.nudge.reason, shownAt: shownAt ?? null, tokenCount, adaptiveGrowth, reInjectFloor });
       }
     }
 
@@ -414,7 +536,7 @@ function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
     // Refused host (OMP): don't inject the ACP system prompt — the model must
     // not learn about compress/decompress on a host where they can't work.
     if (runtime.refused) return;
-    const delegate = runtime.adapter.delegate !== false;
+    const delegate = resolveDelegate(runtime.adapter).enabled;
     const acp = buildAcpSystemPrompt(runtime.prompts);
     const prompt = delegate ? `${acp}\n${ACP_DELEGATE_PROMPT}` : acp;
     return { systemPrompt: formatSystemPromptForEvent(event.systemPrompt, prompt) };

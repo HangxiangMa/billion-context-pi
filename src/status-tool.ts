@@ -2,8 +2,9 @@ import { Type, type Static } from "typebox";
 import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
 import { buildStatusReport, defaultCountTokens, formatRanges, viableRanges } from "acp-kernel";
-import { estimateTokens, collectCoveredMessageIds, collectImageTokens, modelSupportsImages } from "./tokens.js";
+import { estimateTokens, collectCoveredMessageIds, collectImageTokens, modelSupportsImages, adjustedTokenCount } from "./tokens.js";
 import { usageAnchorPredatesCompression } from "./floor-stale.js";
+import { applyOutputHeadroom, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
 import { getSystemPromptText } from "./compat.js";
 import { logThrow } from "./log.js";
 import { getDelegateUsage } from "./delegate-tool.js";
@@ -34,7 +35,7 @@ export function makeStatusTool(runtime: AcpRuntime): ToolDefinition<typeof Statu
     ],
     parameters: StatusParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
-      if (runtime.refused) return { details: undefined, content: [{ type: "text", text: OMP_UNSUPPORTED_MESSAGE }] };
+      if (runtime.refused) return { details: undefined, content: [{ type: "text", text: runtime.refusalMessage ?? OMP_UNSUPPORTED_MESSAGE }] };
       let result: string;
       try {
         result = await handleStatus(params as StatusArgs, runtime, ctx);
@@ -49,7 +50,9 @@ export function makeStatusTool(runtime: AcpRuntime): ToolDefinition<typeof Statu
 
 async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: ExtensionContext): Promise<string> {
   const { state, coreMessages, entries } = await runtime.stateFor(ctx);
-  const config = runtime.configFor(ctx);
+  // Same real request limit (window − output headroom) as the live context
+  // transform, so the reported percentages match the nudge bands (issue #267).
+  const config = applyOutputHeadroom(runtime.configFor(ctx), ctx.model, resolveOutputHeadroomCap(runtime.adapter.outputHeadroomMaxPct));
   // Run the same pipeline (assign-refs → prune → hide-compress-calls → ...) that
   // the context transform runs, so what acp_status reports matches what the
   // model actually receives. Without this, consumed/hidden compress calls and
@@ -60,16 +63,20 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
   // the host's real context usage (issue #257; see src/index.ts).
   const systemPromptText = getSystemPromptText(ctx);
   const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
-  const sentTokens = estimateTokens(coreMessages, coveredIds, collectImageTokens(entries, modelSupportsImages(ctx.model))) + systemPromptTokens;
-  // issue #257: run the nudge decision on the real scale — floor the sent-view
-  // estimate at the host's real context usage (same as src/index.ts).
+  const imageTokens = collectImageTokens(entries, modelSupportsImages(ctx.model));
+  const sentTokens = estimateTokens(coreMessages, coveredIds, imageTokens) + systemPromptTokens;
+  // View-based recount (issue #289): with active blocks the raw-view estimate
+  // can sit far above the sent view and mis-scale the nudge shown here — same
+  // arbitration as src/index.ts. The host floor (#257) applies on top of the
+  // winning base.
+  const viewSentTokens = adjustedTokenCount(runtime.core, coreMessages, state, config, sentTokens, imageTokens, systemPromptTokens);
   const providerReal = ctx.getContextUsage?.()?.tokens ?? 0;
   const anchorStale = usageAnchorPredatesCompression(entries);
   const turn = runtime.core.processTurn({
     messages: coreMessages,
     state,
     config,
-    tokenCount: anchorStale ? sentTokens : Math.max(sentTokens, providerReal),
+    tokenCount: anchorStale ? viewSentTokens : Math.max(viewSentTokens, providerReal),
   });
   const processed = turn.messages;
 
@@ -95,11 +102,11 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
   // visible at a glance (Estimate is the pre-floor sent-view meter).
   if (providerReal > 0 && config.modelContextLimit > 0) {
     const fmtK = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
-    const estPct = Math.round((sentTokens / config.modelContextLimit) * 100);
+    const estPct = Math.round((viewSentTokens / config.modelContextLimit) * 100);
     const realPct = Math.round((providerReal / config.modelContextLimit) * 100);
     extra.push("");
     extra.push(
-      `Estimate: ${fmtK(sentTokens)} (${estPct}%)   |   Provider-reported: ${fmtK(providerReal)} (${realPct}%)`,
+      `Estimate: ${fmtK(viewSentTokens)} (${estPct}%)   |   Provider-reported: ${fmtK(providerReal)} (${realPct}%)`,
     );
   }
   if (nudge) {

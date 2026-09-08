@@ -102,6 +102,7 @@ All keys below are currently **ACTIVE**.
 | `toolBashDefaultTimeout` | number | `60` | 🟢 ACTIVE | Default `bash` tool timeout in seconds when the model omits it. |
 | `toolOutputMaxBytes` | number | `200000` | 🟢 ACTIVE | Hard byte cap on tool result text. |
 | `throttleRetry` | boolean \| object | `true` | 🟢 ACTIVE | Auto-retry provider token rate-limit errors with progressive backoff. |
+| `repetitionGuard` | boolean \| object | `true` | 🟢 ACTIVE | Break infinite loops of byte-identical tool calls (warn at 3 consecutive, block + abort at 5). |
 
 **Delegate keys**
 
@@ -109,6 +110,13 @@ All keys below are currently **ACTIVE**.
 |-----|------|---------|--------|-------------|
 | `delegate.enabled` | boolean | `true` | 🟢 ACTIVE | Enable the `acp_delegate` tools and their system-prompt section. |
 | `delegate.displayUsage` | string | `"separate"` | 🟢 ACTIVE | Controls how delegate sub-agent token usage is reported. |
+| `delegate.maxDepth` | number | `2` | 🟢 ACTIVE | Max nesting depth for `acp_delegate` (main session = depth 0; a session *at* this depth is a leaf and cannot delegate again). Set `1` so delegates never nest. |
+| `delegate.syncTimeoutMinutes` | number | `5` | 🟢 ACTIVE | Hard timeout for **synchronous** `acp_delegate` calls, in minutes. `0` / `null` disables it. |
+| `delegate.idleTimeoutMinutes` | number | `5` | 🟢 ACTIVE | Idle watchdog for async delegate children — force-finish after this many minutes without output. `0` / `null` disables it. |
+| `delegate.asyncTimeoutMinutes` | number | `30` | 🟢 ACTIVE | Absolute hard limit for async delegate children, in minutes. `0` / `null` disables it. |
+| `delegate.maxConcurrent` | number | unlimited | 🟢 ACTIVE | Max background (`async`) delegates running at once; extra launches queue FIFO and start as slots free. `1` = forced serial. Overridden by `PI_ACP_DELEGATE_MAX_CONCURRENT`. |
+| `delegate.thinkingLevel` | string | _(unset)_ | 🟢 ACTIVE | Global default thinking level for delegates (per-call > role > global > Pi default). |
+| `delegate.agents` | object | _(unset)_ | 🟢 ACTIVE | Per-role default model + thinking level, keyed by role name. |
 
 **Provider throttle retry keys**
 
@@ -119,6 +127,14 @@ All keys below are currently **ACTIVE**.
 | `throttleRetry.baseDelayMs` | number | `60000` | 🟢 ACTIVE | Delay before the first paced kick. |
 | `throttleRetry.maxDelayMs` | number | `300000` | 🟢 ACTIVE | Cap for paced kick delays. |
 | `throttleRetry.backoffMode` | string | `"exponential"` | 🟢 ACTIVE | Delay progression: `"exponential"` (×2 per kick) or `"fixed"`. |
+
+**Repetition guard keys**
+
+| Key | Type | Default | Status | Description |
+|-----|------|---------|--------|-------------|
+| `repetitionGuard.enabled` | boolean | `true` | 🟢 ACTIVE | Enable the repetition breaker. `false` disables it entirely. |
+| `repetitionGuard.warn` | number | `3` | 🟢 ACTIVE | Consecutive byte-identical calls before a strong warning is appended to the tool result. |
+| `repetitionGuard.abort` | number | `5` | 🟢 ACTIVE | Consecutive byte-identical calls before the call is blocked (not executed) and the turn is aborted. Must exceed `warn`. |
 
 **Compression keys**
 
@@ -143,6 +159,10 @@ All keys below are currently **ACTIVE**.
 | `ACP_MODEL_CONTEXT_LIMIT` | Override the context limit (takes highest precedence). |
 | `ACP_DEBUG` | Set to `1` / `true` to enable debug logging. |
 | `ACP_LOG_FILE` | Override the log file path (default `~/.pi/acp.log`). |
+| `PI_ACP_DELEGATE_MAX_DEPTH` | Override `delegate.maxDepth`. |
+| `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES` | Override `delegate.syncTimeoutMinutes`; `0` disables the sync hard timeout. |
+| `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES` | Override `delegate.idleTimeoutMinutes`; `0` disables the idle watchdog. |
+| `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES` | Override `delegate.asyncTimeoutMinutes`; `0` disables the async hard limit. |
 
 > **Only the documented keys are read from `acp.json`.** Other tuning knobs (`preserveRecentMessages`, `protectedTools`) are code-level and not user-overridable. The three compression thresholds form a three-tier escalation: growth-driven soft nudges → forced nudges at `compress.maxContextLimit` → emergency truncation at `compress.emergencyThresholdPercent`.
 
@@ -170,6 +190,8 @@ All keys below are currently **ACTIVE**.
 - **Default:** `true`
 - **Status:** 🟢 ACTIVE
 - **Description:** On Pi startup, check the npm registry for a newer version of `billion-context-pi` and auto-install it. Set to `false` to avoid all startup network calls. Can also be disabled via the `ACP_AUTO_UPDATE` environment variable (`ACP_AUTO_UPDATE=0` or `ACP_AUTO_UPDATE=false`), which overrides this setting.
+  - **Read-only install location:** when the copy's install prefix is not writable (e.g. a root-owned `npm i -g` global prefix), auto-update stops retrying that location after the first `EACCES`/permission failure and shows a one-time hint to run `npm i -g billion-context-pi` (or remove the global copy if you rely on pi's bundled install) instead of looping. The check throttle and the stop-retry marker are keyed per install location, so a healthy copy never suppresses a failing one's checks.
+  - **Two parallel mechanisms:** this extension-side auto-update is independent of pi's own core update banner — both can appear, and disabling one does not disable the other.
 
 ### `modelContextLimit`
 
@@ -222,6 +244,72 @@ The `delegate` sub-object controls the `acp_delegate` sub-agent tool family (`ac
 - **Default:** `"separate"`
 - **Status:** 🟢 ACTIVE
 - **Description:** Controls how delegate sub-agent token usage is reported back to the main session. `"separate"` (default) tracks delegate tokens in a separate accumulator — the main session totals stay clean and delegate usage shows as its own block in `acp_status` (excluded from main totals). `"merged"` folds delegate token usage into the tool-result `usage` field so it is counted as part of the main session totals. Only meaningful when `delegate.enabled` is `true`.
+
+### `delegate.maxDepth`
+
+- **Type:** integer ≥ 1
+- **Default:** `2`
+- **Status:** 🟢 ACTIVE
+- **Description:** Maximum nesting depth for `acp_delegate`. Depth counts how far a session sits below the main session (main = 0); a session may only spawn a delegate while its own depth is **below** this limit, so a session *at* the limit becomes a leaf and cannot delegate again. The default `2` allows main → delegate → sub-delegate; set `1` for an orchestrator / leaf-worker pattern where delegates never nest further. The resolved limit is propagated to children via the internal `PI_ACP_DELEGATE_MAX_DEPTH` environment variable, so it binds the whole delegation tree even if a child loads a different project `acp.json`. Invalid values (non-integer, `< 1`) fall back to the default with a warning log. Environment override: `PI_ACP_DELEGATE_MAX_DEPTH` (takes precedence over this key).
+
+### `delegate.syncTimeoutMinutes`
+
+- **Type:** number (minutes, fractional allowed) or `0` / `null`
+- **Default:** `5`
+- **Status:** 🟢 ACTIVE
+- **Description:** Hard timeout for **synchronous** `acp_delegate` calls — the child process is killed (SIGTERM) if it has not finished within this window. Set `0` (or `null`) to run synchronous delegates without a hard timeout. Fractional minutes are accepted (e.g. `0.5` = 30s). Invalid values fall back to the default with a warning log. Environment override: `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES` (`0` disables).
+
+### `delegate.idleTimeoutMinutes`
+
+- **Type:** number (minutes, fractional allowed) or `0` / `null`
+- **Default:** `5`
+- **Status:** 🟢 ACTIVE
+- **Description:** Idle watchdog for async delegate children: if a child produces **no output** for this long, it is considered hung and force-finished. This is the primary defense against a stuck child holding its stdout pipe open. Set `0` (or `null`) to disable it — ACP logs a prominent warning when you do; `acp_delegate_cancel` remains available as a manual escape hatch. Fractional minutes are accepted. Invalid values fall back to the default with a warning log. Environment override: `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES` (`0` disables).
+
+### `delegate.asyncTimeoutMinutes`
+
+- **Type:** number (minutes, fractional allowed) or `0` / `null`
+- **Default:** `30`
+- **Status:** 🟢 ACTIVE
+- **Description:** Absolute hard limit for **asynchronous** delegate children, regardless of activity. Set `0` (or `null`) to run long tasks without an absolute cap — the idle watchdog still applies unless separately disabled. Fractional minutes are accepted. Invalid values fall back to the default with a warning log. Environment override: `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES` (`0` disables).
+
+### `delegate.maxConcurrent`
+
+- **Type:** number (integer ≥ 1)
+- **Default:** unlimited (no concurrency cap)
+- **Status:** 🟢 ACTIVE
+- **Environment override:** `PI_ACP_DELEGATE_MAX_CONCURRENT` (takes precedence over this key)
+- **Description:** Caps how many background (`async: true`) delegates run **at the same time**. When the limit is reached, further launches are held in a FIFO queue and start automatically as soon as a slot frees, so nothing is dropped — they just wait their turn. Set `1` to force strictly serial execution (useful on low-power machines where parallel sub-agents contend for CPU and time out). Sync (`async: false`) calls always run immediately and are not affected by this cap. Invalid values (non-integers or `< 1`) fall back to unlimited with a warning rather than failing the session. Only meaningful when `delegate.enabled` is `true`.
+
+### `delegate.thinkingLevel`
+
+- **Type:** string enum `"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"`
+- **Default:** _(unset — each child uses Pi's own default)_
+- **Status:** 🟢 ACTIVE
+- **Description:** Global default thinking level applied to every delegate when neither the per-call `thinkingLevel` nor the role's own `thinkingLevel` (see `delegate.agents`) is set. Without any value at all levels, no `--thinking` flag is passed and each child runs on Pi's own default. An invalid value is ignored with a warning logged (it never fails the run). A per-call `acp_delegate({ thinkingLevel })` always wins over this global.
+
+### `delegate.agents`
+
+- **Type:** object — map of role name → `{ model?, thinkingLevel? }`
+- **Default:** _(unset — all roles inherit the parent model + Pi defaults)_
+- **Status:** 🟢 ACTIVE
+- **Description:** Per-role defaults so long-lived automation can pin a cheaper or more capable model and thinking level per delegate role without the main agent having to fill them in on every call. Keys are role names (`reviewer`, `researcher`, `worker`, `planner`, `oracle`, or any custom role). Each value may set:
+  - `model` (`"provider/id"`) — this role's default model. Resolution priority: per-call `model` > this role's `model` > parent agent's current model. A value that isn't a valid `"provider/id"` is ignored. If the configured model doesn't exist in the live registry, the child falls back to the parent model and a warning is logged — it never fails.
+  - `thinkingLevel` — this role's default thinking level (same enum as `delegate.thinkingLevel`). Priority: per-call > role > global.
+
+```jsonc
+{
+  "delegate": {
+    "thinkingLevel": "low",
+    "agents": {
+      "reviewer": { "model": "opencode-go/deepseek-v4-flash", "thinkingLevel": "high" },
+      "worker":   { "model": "anthropic/claude-sonnet-4-5" },
+      "oracle":   { "model": "openai/gpt-5", "thinkingLevel": "xhigh" }
+    }
+  }
+}
+```
+
 
 ---
 
@@ -295,6 +383,57 @@ How it works:
 
 ---
 
+## Tool Call Repetition Guard
+
+The `repetitionGuard` key breaks **infinite loops of byte-identical tool calls**. Small greedy-decoding models can get stuck re-emitting the exact same `(tool call → tool result)` pair turn after turn — e.g. calling `acp_status {"scope":"uncompressed","view":"ranges"}` dozens of times with identical arguments while context grows each round. Token-level penalties cannot break this, because it is a *sequence-level* attractor (the repetition crosses turn boundaries), not a within-sequence token repetition.
+
+The guard fingerprints each tool call as `sha1(toolName + canonical-JSON(args))`, where the JSON serialization sorts object keys so that only the *arguments* matter — key order and result content are ignored. It tracks the length of the current run of consecutive identical calls per session:
+
+- At **`warn`** consecutive identical calls, a strong warning is appended to the matching tool result telling the model to stop repeating the call.
+- At **`abort`** consecutive identical calls, the call is **blocked** (not executed), the turn is aborted, and a terminal notification is shown.
+
+Any change to the arguments (or a switch to a different tool) resets the counter, as does a real user message (extension-sent messages do not reset it).
+
+### `repetitionGuard`
+
+- **Type:** boolean \| object
+- **Default:** `true`
+- **Status:** 🟢 ACTIVE
+- **Description:** Enable/disable the repetition breaker and tune its thresholds. `repetitionGuard: false` disables it entirely. Object form (any subset):
+
+  ```json
+  {
+    "repetitionGuard": {
+      "enabled": true,
+      "warn": 3,
+      "abort": 5
+    }
+  }
+  ```
+
+### `repetitionGuard.enabled`
+
+- **Type:** boolean
+- **Default:** `true`
+- **Status:** 🟢 ACTIVE
+- **Description:** Turn the feature on/off. `false` (or top-level `repetitionGuard: false`) disables all repetition detection.
+
+### `repetitionGuard.warn`
+
+- **Type:** number
+- **Default:** `3`
+- **Status:** 🟢 ACTIVE
+- **Description:** Number of consecutive byte-identical calls before a warning is appended to the tool result. Must be at least 1.
+
+### `repetitionGuard.abort`
+
+- **Type:** number
+- **Default:** `5`
+- **Status:** 🟢 ACTIVE
+- **Description:** Number of consecutive byte-identical calls before the call is blocked and the turn is aborted. Must be greater than `warn`; if misconfigured lower, it is clamped up to `warn + 1`.
+
+---
+
 ## Compression Tuning
 
 The `compress` sub-object groups the three thresholds that form a **three-tier escalation** for context management. They control *when* the model is nudged to compress and *when* large outputs are forcibly truncated to keep the session alive. Lower thresholds mean the extension compresses earlier and more aggressively.
@@ -325,6 +464,7 @@ The flow is:
 - **Default:** `50000`
 - **Status:** 🟢 ACTIVE
 - **Description:** The token-growth threshold that controls the cadence of **soft** compression nudges. A soft nudge fires roughly every time this many tokens of new compressible content accumulate. A lower value means the model is nudged to compress more often; a higher value means less frequent nudges. This only governs *growth-driven* nudges — once usage crosses `compress.maxContextLimit`, forced nudges take over regardless of this setting. Maps to the kernel settings `nudge.growthFloor` and `nudge.growthCap`.
+- **Same-turn re-inject:** within one user turn a nudge injects at most once, but once the context has since grown by a full growth floor (mirroring the kernel's anti-thrashing cadence: `max(minGrowthFloor, minGrowthRatio × adaptiveGrowth)` — 22.5K tokens with defaults) a fresh reminder re-injects in the same turn (issue #269: a model that ignored a 78% nudge used to stay silent until the 95% emergency truncation). After a successful compress the growth baseline re-anchors to the new (smaller) scale, so post-compress regrowth into the pressure band is not held against the pre-compress peak.
 
 ### `compress.providers` — per-provider & per-model overrides
 
@@ -429,3 +569,38 @@ Environment variables take precedence over the JSON config files. They are usefu
 - **Default:** `~/.pi/acp.log`
 - **Status:** 🟢 ACTIVE
 - **Description:** Override the path to the log file. By default, structured logs are written to `~/.pi/acp.log` (the file rotates to `~/.pi/acp.log.old` at 10 MB). Point this at a different location to keep per-project or per-run logs separate.
+
+### `PI_ACP_DELEGATE_MAX_DEPTH`
+
+- **Type:** integer ≥ 1
+- **Default:** *(unset — follows `delegate.maxDepth`, then 2)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Override the maximum delegate nesting depth for one session without editing config. Takes precedence over `delegate.maxDepth`. The resolved value is what gets propagated down the delegation tree. Do not set this manually mid-tree: it is also the internal variable ACP uses to pass the *effective limit* into child processes.
+
+### `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES`
+
+- **Type:** number (minutes) or `0`
+- **Default:** *(unset — follows `delegate.syncTimeoutMinutes`, then 5)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Override the synchronous `acp_delegate` hard timeout. Set `0` to disable the sync hard timeout for one session. Takes precedence over `delegate.syncTimeoutMinutes`.
+
+### `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES`
+
+- **Type:** number (minutes) or `0`
+- **Default:** *(unset — follows `delegate.idleTimeoutMinutes`, then 5)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Override the async idle watchdog window. Set `0` to disable the idle watchdog for one session (ACP logs a warning; `acp_delegate_cancel` remains as a manual escape hatch). Takes precedence over `delegate.idleTimeoutMinutes`.
+
+### `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES`
+
+- **Type:** number (minutes) or `0`
+- **Default:** *(unset — follows `delegate.asyncTimeoutMinutes`, then 30)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Override the absolute hard limit for async delegate children. Set `0` to run long tasks without an absolute cap (the idle watchdog still applies unless disabled). Takes precedence over `delegate.asyncTimeoutMinutes`.
+
+### `PI_ACP_DELEGATE_MAX_CONCURRENT`
+
+- **Type:** integer (≥ 1)
+- **Default:** *(unset — cap follows `delegate.maxConcurrent`, then unlimited)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Override the background (`async`) delegate concurrency cap. **Takes precedence** over `delegate.maxConcurrent`. Set to `1` for forced serial execution. Invalid values fall back to the next source (then unlimited) with a warning rather than failing the session.

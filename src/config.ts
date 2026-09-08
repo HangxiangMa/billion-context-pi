@@ -1,5 +1,23 @@
 import { defaultConfig, type Config, type Prompts } from "acp-kernel";
 import type { ThrottleRetryConfig } from "./throttle-retry.js";
+import { logWarn } from "./log.js";
+
+/** Per-role delegate defaults. Lets long-lived automation pin a cheaper or
+ *  more capable model and a thinking level per delegate role, so the main
+ *  agent doesn't have to fill them in on every `acp_delegate()` call. */
+export interface DelegateRoleConfig {
+  /** Default model for this role, as `"provider/id"`. Resolution priority:
+   *  per-call `model` > this role default > parent agent's current model. A
+   *  value that isn't a valid `"provider/id"` is ignored (treated as unset).
+   *  If the configured model doesn't exist in the live registry, the child
+   *  falls back to the parent model and a warning is logged — it never fails. */
+  model?: string;
+  /** Default thinking level for this role: one of off|minimal|low|medium|
+   *  high|xhigh|max. Resolution priority: per-call `thinkingLevel` > this role
+   *  default > global `delegate.thinkingLevel` > Pi's own default. An invalid
+   *  value is ignored with a warning (never fails). */
+  thinkingLevel?: string;
+}
 
 /** Delegate sub-agent configuration. */
 export interface DelegateConfig {
@@ -13,7 +31,79 @@ export interface DelegateConfig {
    *  "merged" — delegate token usage folded into the tool-result usage field,
    *  counted as part of the main session totals. */
   displayUsage?: "merged" | "separate";
+  /** Maximum acp_delegate nesting depth. Default: 2 (main → child → grandchild;
+   *  the grandchild cannot delegate further). Set 1 to forbid nested delegation
+   *  (orchestrator → leaf workers only). The resolved value is propagated to
+   *  child processes via PI_ACP_DELEGATE_MAX_DEPTH so the cap follows the whole
+   *  delegation tree, even when a child loads a different project acp.json. */
+  maxDepth?: number;
+  /** Hard timeout for synchronous delegates (async=false, or async auto-downgraded
+   *  on one-shot hosts), in minutes. Default: 5. 0 or null disables the timeout
+   *  (the run blocks until the child exits or the tool call is cancelled). */
+  syncTimeoutMinutes?: number | null;
+  /** Idle watchdog for async delegates: kill when no output arrives for this many
+   *  minutes. Default: 5. This is the main defense against a stuck child holding
+   *  its stdout fd open, so disabling it (0/null) logs a warning — use
+   *  acp_delegate_cancel as the manual escape hatch. */
+  idleTimeoutMinutes?: number | null;
+  /** Hard time limit for async delegates, in minutes. Default: 30. 0 or null
+   *  disables the limit. */
+  asyncTimeoutMinutes?: number | null;
+  /** Cap on how many background (async) delegate processes run at once.
+   *  `1` forces strict serial execution; `N` allows up to N in parallel;
+   *  omitted means unlimited (existing behavior). Extra launches are queued and
+   *  start automatically as slots free. Invalid values (non-integer, <1) fall
+   *  back to unlimited with a warning. Env `PI_ACP_DELEGATE_MAX_CONCURRENT`
+   *  overrides this. See #294. */
+  maxConcurrent?: number;
+  /** Global default thinking level applied to every delegate when neither the
+   *  per-call `thinkingLevel` nor the role's own `thinkingLevel` is set. One of
+   *  off|minimal|low|medium|high|xhigh|max. When unset at all levels, no
+   *  `--thinking` flag is passed and each child uses Pi's own default. */
+  thinkingLevel?: string;
+  /** Per-role defaults keyed by role name (reviewer/researcher/worker/planner/
+   *  oracle, or any custom role). See DelegateRoleConfig. Only affects roles
+   *  that are named here; other roles inherit the parent model + Pi defaults. */
+  agents?: Record<string, DelegateRoleConfig>;
+  /** What happens to the completion notification when the model has already
+   *  read the delegate's result file after the run finished.
+   *  "skip" (default) — the notification is not injected; the model already
+   *  saw the result, so re-injecting it would only waste context.
+   *  "always" — always inject the notification (previous behavior). */
+  notifyIfRead?: "skip" | "always";
 }
+
+/** Resolved delegate policy: what actually takes effect after merging acp.json,
+ *  env overrides and defaults. Timeout fields are milliseconds; null means the
+ *  corresponding timeout/watchdog is disabled. */
+export interface DelegatePolicy {
+  enabled: boolean;
+  displayUsage: "merged" | "separate";
+  maxDepth: number;
+  syncTimeoutMs: number | null;
+  idleMs: number | null;
+  asyncTimeoutMs: number | null;
+  /** Resolved cap on concurrent background delegates; Infinity = unlimited. */
+  maxConcurrent: number;
+  /** Global default thinking level (undefined when unset). */
+  thinkingLevel?: string;
+  /** Per-role defaults keyed by role name (undefined when unset). */
+  agents?: Record<string, DelegateRoleConfig>;
+  /** Whether to suppress the completion notification when the model already
+   *  read the result file after the run finished. Always resolved ("skip" default). */
+  notifyIfRead: "skip" | "always";
+}
+
+export const DEFAULT_DELEGATE_POLICY: DelegatePolicy = {
+  enabled: true,
+  displayUsage: "separate",
+  maxDepth: 2,
+  syncTimeoutMs: 5 * 60_000,
+  idleMs: 5 * 60_000,
+  asyncTimeoutMs: 30 * 60_000,
+  maxConcurrent: Infinity,
+  notifyIfRead: "skip",
+};
 
 /** Compression tuning fields, shared by all three levels (global, provider,
  *  model). Percentage fields accept a ratio (0.75) or percent string ("75%").
@@ -32,6 +122,13 @@ export interface CompressSettings {
   /** Token growth threshold for soft compression nudges. Default: 50000.
    *  Maps to kernel nudge.growthFloor + nudge.growthCap. */
   nudgeGrowthTokens?: number;
+  /** Minimum reclaimable tokens for a pressure-band nudge (kernel #198).
+   *  Default: max(5000, round(limit×0.01)). Explicit 0 restores the legacy
+   *  any-pending behavior — useful for tiny windows (e.g. e2e scenarios with
+   *  modelContextLimit 1500) where a fixed 5000-token floor exceeds the whole
+   *  window and would suppress every nudge. Maps to kernel
+   *  nudge.minPressureBenefitTokens. */
+  minPressureBenefitTokens?: number;
 }
 
 /** Per-provider compression overrides. Carries the same tuning fields as the
@@ -53,9 +150,32 @@ export interface CompressConfig extends CompressSettings {
   providers?: Record<string, ProviderCompress>;
 }
 
+/** Generic tool-call repetition guard. Detects the same tool being called
+ *  repeatedly with byte-identical arguments — a sequence-level attractor that
+ *  token-level penalties cannot break (greedy small models loop on e.g.
+ *  acp_status or bash polls forever, each round adding protected tokens that
+ *  the compression protection band then refuses to reclaim). Consecutive
+ *  identical calls accumulate per session: at `warn` a strong warning is
+ *  appended to that call's toolResult; at `abort` the call is refused (blocked,
+ *  error toolResult) and the turn aborted so the attractor breaks. Any change
+ *  to the arguments (or a switch to a different tool) resets the counter.
+ *  Accepts a boolean shorthand (`false` disables) or an object. Default:
+ *  enabled, warn=3, abort=5. See issue #308. */
+export interface RepetitionGuardConfig {
+  /** Enable/disable the guard. Default: true. */
+  enabled?: boolean;
+  /** Consecutive identical calls before a strong warning is appended to the
+   *  matching toolResult. Default: 3. */
+  warn?: number;
+  /** Consecutive identical calls before the call is refused and the turn
+   *  aborted. Default: 5. Must be greater than `warn`; clamped up
+   *  automatically if not. */
+  abort?: number;
+}
+
 /**
  * Adapter configuration. Maps onto acp-kernel's `Config` plus Pi-specific knobs
- * (live model context window, protected tools, state persistence).
+ *  (live model context window, protected tools, state persistence).
  */
 export interface AdapterConfig {
   /** Master switch. Default: true. Set `enabled: false` in acp.json (or
@@ -111,6 +231,11 @@ export interface AdapterConfig {
    *  reservation entirely; >= 1 restores the legacy full-capability
    *  reservation (issue #207). */
   outputHeadroomMaxPct?: number | string;
+  /** Generic tool-call repetition guard (see RepetitionGuardConfig). Accepts a
+   *  boolean shorthand (`false` disables) or an object. Default: enabled,
+   *  warn=3, abort=5. Stops greedy small models looping on byte-identical
+   *  tool calls (issue #308). */
+  repetitionGuard?: boolean | RepetitionGuardConfig;
   /** Legacy flat alias for `delegate.displayUsage`. Kept for backward
    *  compatibility with existing acp.json files. Prefer `delegate.displayUsage`. */
   displayUsage?: "merged" | "separate";
@@ -130,19 +255,100 @@ export const DEFAULT_TOOL_BASH_TIMEOUT = 60;
 export const DEFAULT_TOOL_OUTPUT_MAX_BYTES = 200_000;
 
 /** Resolve delegate config from the adapter, handling the boolean shorthand
- *  and the legacy flat `displayUsage` alias. */
-export function resolveDelegate(adapter: AdapterConfig): { enabled: boolean; displayUsage: "merged" | "separate" } {
+ *  and the legacy flat `displayUsage` alias. Precedence: env > acp.json >
+ *  default (same convention as ACP_MODEL_CONTEXT_LIMIT). Invalid values fall
+ *  back to the default with a logged warning — they never fail the session. */
+export function resolveDelegate(adapter: AdapterConfig): DelegatePolicy {
   const d = adapter.delegate;
-  if (typeof d === "object" && d !== null) {
-    return {
-      enabled: d.enabled !== false,
-      displayUsage: d.displayUsage ?? adapter.displayUsage ?? "separate",
-    };
+  const cfg: DelegateConfig = typeof d === "object" && d !== null ? d : {};
+  const enabled = typeof d === "object" && d !== null ? d.enabled !== false : d !== false;
+  const displayUsage = cfg.displayUsage ?? adapter.displayUsage ?? "separate";
+  const maxDepth = resolveMaxDepth(process.env.PI_ACP_DELEGATE_MAX_DEPTH ?? cfg.maxDepth);
+  const syncTimeoutMs = resolveTimeoutMinutes(
+    process.env.PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES ?? cfg.syncTimeoutMinutes,
+    "syncTimeoutMinutes",
+    DEFAULT_DELEGATE_POLICY.syncTimeoutMs!,
+  );
+  const idleMs = resolveTimeoutMinutes(
+    process.env.PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES ?? cfg.idleTimeoutMinutes,
+    "idleTimeoutMinutes",
+    DEFAULT_DELEGATE_POLICY.idleMs!,
+  );
+  const asyncTimeoutMs = resolveTimeoutMinutes(
+    process.env.PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES ?? cfg.asyncTimeoutMinutes,
+    "asyncTimeoutMinutes",
+    DEFAULT_DELEGATE_POLICY.asyncTimeoutMs!,
+  );
+  const maxConcurrent = resolveMaxConcurrent(process.env.PI_ACP_DELEGATE_MAX_CONCURRENT, cfg.maxConcurrent);
+  if (idleMs === null) {
+    logWarn("config", {
+      event: "delegate-idle-watchdog-disabled",
+      hint: "no-output watchdog is off; hung async runs must be cancelled manually via acp_delegate_cancel",
+    });
   }
-  return {
-    enabled: d !== false,
-    displayUsage: adapter.displayUsage ?? "separate",
-  };
+  return { enabled, displayUsage, maxDepth, syncTimeoutMs, idleMs, asyncTimeoutMs, maxConcurrent, thinkingLevel: cfg.thinkingLevel, agents: cfg.agents, notifyIfRead: cfg.notifyIfRead ?? "skip" };
+}
+
+function resolveMaxDepth(value: number | string | undefined): number {
+  if (value === undefined) return DEFAULT_DELEGATE_POLICY.maxDepth;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) {
+    logWarn("config", { event: "delegate-config-invalid", field: "maxDepth", value, fallback: DEFAULT_DELEGATE_POLICY.maxDepth });
+    return DEFAULT_DELEGATE_POLICY.maxDepth;
+  }
+  return n;
+}
+
+function resolveTimeoutMinutes(value: number | string | null | undefined, field: string, defaultMs: number): number | null {
+  if (value === undefined) return defaultMs;
+  if (value === null) return null;
+  const n = Number(value);
+  if (n === 0) return null;
+  if (!Number.isFinite(n) || n < 0) {
+    logWarn("config", { event: "delegate-config-invalid", field, value, fallback: `${defaultMs / 60_000}m` });
+    return defaultMs;
+  }
+  return n * 60_000;
+}
+
+function resolveMaxConcurrent(envValue: string | undefined, cfgValue: number | undefined): number {
+  // Two-source resolution (env > acp.json > unlimited). Unlike the timeout/depth
+  // fields (env ?? cfg), an INVALID env value falls through to acp.json rather
+  // than to the default — preserving #294's original setDelegateMaxConcurrent
+  // semantics. Invalid values warn and never fail the session.
+  const sources: Array<[string, string | number | undefined]> = [
+    ["PI_ACP_DELEGATE_MAX_CONCURRENT", envValue],
+    ["acp.json delegate.maxConcurrent", cfgValue],
+  ];
+  for (const [name, raw] of sources) {
+    if (raw === undefined || raw === "") continue;
+    const n = typeof raw === "number" ? raw : Number(raw);
+    if (Number.isInteger(n) && n >= 1) return n;
+    logWarn("config", { event: "delegate-config-invalid", field: "maxConcurrent", source: name, value: String(raw), fallback: "unlimited" });
+  }
+  return DEFAULT_DELEGATE_POLICY.maxConcurrent;
+}
+
+/** Defaults for the generic tool-call repetition guard (issue #308). */
+export const REPETITION_GUARD_DEFAULTS = { warn: 3, abort: 5 } as const;
+
+function positiveInt(v: unknown, fallback: number): number {
+  return typeof v === "number" && Number.isFinite(v) && v >= 1 ? Math.floor(v) : fallback;
+}
+
+/** Resolve the repetition-guard configuration from the adapter, handling the
+ *  boolean shorthand (`false` disables) and clamping `abort` to stay strictly
+ *  above `warn` (a guard that aborts at or before its warn threshold would be
+ *  meaningless). Non-numeric / out-of-range values fall back to defaults. */
+export function resolveRepetitionGuard(adapter: AdapterConfig): { enabled: boolean; warn: number; abort: number } {
+  const g = adapter.repetitionGuard;
+  if (g === false) return { enabled: false, warn: REPETITION_GUARD_DEFAULTS.warn, abort: REPETITION_GUARD_DEFAULTS.abort };
+  if (typeof g === "object" && g !== null) {
+    const warn = positiveInt(g.warn, REPETITION_GUARD_DEFAULTS.warn);
+    const abort = Math.max(positiveInt(g.abort, REPETITION_GUARD_DEFAULTS.abort), warn + 1);
+    return { enabled: g.enabled !== false, warn, abort };
+  }
+  return { enabled: true, warn: REPETITION_GUARD_DEFAULTS.warn, abort: REPETITION_GUARD_DEFAULTS.abort };
 }
 
 /** Per-field deepest-wins merge of the three compression levels (global →
@@ -157,6 +363,7 @@ export function mergeCompress(
     maxContextLimit: model?.maxContextLimit ?? provider?.maxContextLimit ?? global?.maxContextLimit,
     emergencyThresholdPercent: model?.emergencyThresholdPercent ?? provider?.emergencyThresholdPercent ?? global?.emergencyThresholdPercent,
     nudgeGrowthTokens: model?.nudgeGrowthTokens ?? provider?.nudgeGrowthTokens ?? global?.nudgeGrowthTokens,
+    minPressureBenefitTokens: model?.minPressureBenefitTokens ?? provider?.minPressureBenefitTokens ?? global?.minPressureBenefitTokens,
   };
 }
 
@@ -203,6 +410,9 @@ export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number, 
   if (c.nudgeGrowthTokens !== undefined) {
     config.nudge.growthFloor = c.nudgeGrowthTokens;
     config.nudge.growthCap = c.nudgeGrowthTokens;
+  }
+  if (c.minPressureBenefitTokens !== undefined) {
+    config.nudge.minPressureBenefitTokens = c.minPressureBenefitTokens;
   }
   return config;
 }

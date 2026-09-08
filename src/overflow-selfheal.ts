@@ -21,6 +21,8 @@
 // OVERFLOW_GUARD in src/throttle-retry.ts (which uses it to AVOID treating an
 // overflow as a throttle). Keep the two in sync when either changes.
 
+import { parsePercent } from "./config.js";
+
 // Detect a context-overflow error. Deliberately does NOT match Bedrock's
 // "too many tokens" throttle (a 429, handled by throttle-retry) — only
 // genuine context-length errors. The extra phrasings mirror pi-ai's own
@@ -85,6 +87,14 @@ function toTokenNumber(raw: string | undefined): number | undefined {
  *  + armed emergency) recovers it on the next turn. */
 export const DEFAULT_OUTPUT_HEADROOM_MAX_PCT = 0.25;
 
+/** Resolve the user's `outputHeadroomMaxPct` (ratio or "N%" string) to a
+ *  numeric cap, falling back to DEFAULT_OUTPUT_HEADROOM_MAX_PCT when unset.
+ *  Shared by every headroom call site (context transform, /acp, acp_status)
+ *  so they all measure against the SAME capped limit (issue #207/#267). */
+export function resolveOutputHeadroomCap(value: number | string | undefined): number {
+  return value === undefined ? DEFAULT_OUTPUT_HEADROOM_MAX_PCT : parsePercent(value);
+}
+
 /**
  * Reserve the model's output budget from the context window, so the kernel's
  * nudge/truncate bands sit below (window - reserved) and the context leaves
@@ -133,6 +143,34 @@ export function reserveOutputHeadroom(window: number, maxOutput: number, capPct:
  */
 export function shouldReserveOutputHeadroom(api: string | undefined): boolean {
   return api !== "anthropic-messages";
+}
+
+/**
+ * Apply the output-headroom reservation to a resolved config's modelContextLimit
+ * (see reserveOutputHeadroom / shouldReserveOutputHeadroom). Returns a NEW config
+ * (never mutates the input) so the shared resolved config stays untouched. Used
+ * by BOTH the live context transform and the read-only panel surfaces (/acp,
+ * acp_status) so every percentage is measured against the SAME real request
+ * limit — otherwise the panel reports against the full window while the nudge
+ * bands run against (window − maxOutput) (issue #267).
+ *
+ * `capPct` bounds the reservation as a fraction of the window (see
+ * reserveOutputHeadroom); callers pass resolveOutputHeadroomCap(
+ * adapter.outputHeadroomMaxPct) so the panel and the nudge bands share the
+ * same capped limit (issue #207). The default (1) preserves the legacy
+ * full-capability reservation for callers that don't pass a cap.
+ */
+export function applyOutputHeadroom<T extends { modelContextLimit: number }>(
+  config: T,
+  model: { maxTokens?: number; api?: string } | undefined,
+  capPct: number = 1,
+): T {
+  const maxOutput = model?.maxTokens ?? 0;
+  if (shouldReserveOutputHeadroom(model?.api)) {
+    const reserved = reserveOutputHeadroom(config.modelContextLimit, maxOutput, capPct);
+    if (reserved !== config.modelContextLimit) return { ...config, modelContextLimit: reserved };
+  }
+  return config;
 }
 
 // Per-session overflow self-heal state. Keyed by session id so concurrent

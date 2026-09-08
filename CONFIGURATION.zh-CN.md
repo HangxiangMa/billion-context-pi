@@ -101,6 +101,7 @@
 | `toolBashDefaultTimeout` | number | `60` | 🟢 ACTIVE | 模型省略 `timeout` 时注入 bash 工具的默认超时秒数。 |
 | `toolOutputMaxBytes` | number | `200000` | 🟢 ACTIVE | 工具返回文本的硬性字节上限。 |
 | `throttleRetry` | boolean \| object | `true` | 🟢 ACTIVE | 自动重试 provider 侧 token 限流错误（递进退避）。 |
+| `repetitionGuard` | boolean \| object | `true` | 🟢 ACTIVE | 打断字节级完全相同的工具调用死循环（连续 3 次告警，连续 5 次拦截并中止本轮）。 |
 
 **delegate 键**
 
@@ -108,6 +109,13 @@
 |----|------|--------|------|------|
 | `delegate.enabled` | boolean | `true` | 🟢 ACTIVE | 启用 `acp_delegate` 工具及其系统提示部分。 |
 | `delegate.displayUsage` | string | `"separate"` | 🟢 ACTIVE | 控制 delegate 子代理的 token 用量如何报回主会话。 |
+| `delegate.maxDepth` | number | `2` | 🟢 ACTIVE | `acp_delegate` 最大嵌套深度（主会话 = 深度 0；处于该深度的会话成为叶子，不能再委派）。设为 `1` 可禁止 delegate 再嵌套。 |
+| `delegate.syncTimeoutMinutes` | number | `5` | 🟢 ACTIVE | **同步** `acp_delegate` 调用的硬超时（分钟）。`0` / `null` 禁用。 |
+| `delegate.idleTimeoutMinutes` | number | `5` | 🟢 ACTIVE | 异步 delegate 子进程的闲置看门狗——无输出超过该时长即强制结束。`0` / `null` 禁用。 |
+| `delegate.asyncTimeoutMinutes` | number | `30` | 🟢 ACTIVE | 异步 delegate 子进程的绝对硬上限（分钟）。`0` / `null` 禁用。 |
+| `delegate.maxConcurrent` | number | unlimited | 🟢 ACTIVE | 同时运行的后台（`async`）delegate 上限；超出的启动按 FIFO 排队，有空位时自动开始。`1` = 强制串行。可被 `PI_ACP_DELEGATE_MAX_CONCURRENT` 覆盖。 |
+| `delegate.thinkingLevel` | string | _（未设置）_ | 🟢 ACTIVE | delegate 全局默认 thinking level（per-call > 角色 > 全局 > Pi 默认）。 |
+| `delegate.agents` | object | _（未设置）_ | 🟢 ACTIVE | 按角色配置默认模型 + thinking level，以角色名为键。 |
 
 **provider 限流重试键**
 
@@ -118,6 +126,14 @@
 | `throttleRetry.baseDelayMs` | number | `60000` | 🟢 ACTIVE | 首次递进 kick 前的等待毫秒数。 |
 | `throttleRetry.maxDelayMs` | number | `300000` | 🟢 ACTIVE | 递进 kick 延迟上限。 |
 | `throttleRetry.backoffMode` | string | `"exponential"` | 🟢 ACTIVE | 延迟递进方式：`"exponential"`（每次 kick ×2）或 `"fixed"`。 |
+
+**重复熔断键**
+
+| 键 | 类型 | 默认值 | 状态 | 说明 |
+|----|------|--------|------|------|
+| `repetitionGuard.enabled` | boolean | `true` | 🟢 ACTIVE | 启用重复熔断。`false` 完全关闭。 |
+| `repetitionGuard.warn` | number | `3` | 🟢 ACTIVE | 连续字节级相同调用达到该次数后，在工具返回尾部追加强警告。 |
+| `repetitionGuard.abort` | number | `5` | 🟢 ACTIVE | 连续字节级相同调用达到该次数后，拦截该调用（不执行）并中止本轮。必须大于 `warn`。 |
 
 **compress 键**
 
@@ -142,6 +158,10 @@
 | `ACP_MODEL_CONTEXT_LIMIT` | 覆盖上下文窗口大小（优先级最高）。 |
 | `ACP_DEBUG` | 设为 `1` / `true` 开启调试日志。 |
 | `ACP_LOG_FILE` | 覆盖日志文件路径（默认 `~/.pi/acp.log`）。 |
+| `PI_ACP_DELEGATE_MAX_DEPTH` | 覆盖 `delegate.maxDepth`。 |
+| `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES` | 覆盖 `delegate.syncTimeoutMinutes`；`0` 禁用同步硬超时。 |
+| `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES` | 覆盖 `delegate.idleTimeoutMinutes`；`0` 禁用闲置看门狗。 |
+| `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES` | 覆盖 `delegate.asyncTimeoutMinutes`；`0` 禁用异步硬上限。 |
 
 > **只有文档中列出的键才会从 `acp.json` 读取。** 其他调优参数（`preserveRecentMessages`、`protectedTools`）是代码级别的，不开放给用户。三个压缩阈值构成三级递进：基于增长的软 nudge → 越过 `compress.maxContextLimit` 后的强制 nudge → 越过 `compress.emergencyThresholdPercent` 后的紧急截断。
 
@@ -162,6 +182,8 @@
 - **默认值：** `true`
 - **状态：** 🟢 ACTIVE
 - **说明：** Pi 启动时检查 npm 是否有更新版本的 `billion-context-pi` 并自动安装。设为 `false` 可避免启动时的所有网络请求。也可通过 `ACP_AUTO_UPDATE` 环境变量（`ACP_AUTO_UPDATE=0` 或 `ACP_AUTO_UPDATE=false`）禁用，该变量优先于此配置。
+  - **只读安装位置：** 当该副本的安装前缀不可写（如 root 所有的 `npm i -g` 全局前缀）时，自动更新在首次 `EACCES`/权限失败后停止对该位置的重试，并一次性提示运行 `npm i -g billion-context-pi`（或若依赖 pi 自带安装则移除全局副本），而不是无限循环。检查节流与停止重试标记均按安装位置区分，因此健康副本不会压制失败副本的检查。
+  - **两套并行机制：** 此扩展侧自动更新与 pi 核心自身的更新 banner 相互独立——两者可能同时出现，禁用其中一个不影响另一个。
 
 ### `modelContextLimit`
 
@@ -214,6 +236,72 @@
 - **默认值：** `"separate"`
 - **状态：** 🟢 ACTIVE
 - **说明：** 控制 delegate 子代理的 token 用量如何报回主会话。`"separate"`（默认）将 delegate token 记入独立累加器——主会话总量保持干净，delegate 用量在 `acp_status` 中单独显示一块（不计入主总量）。`"merged"` 将 delegate token 用量并入工具返回的 `usage` 字段，算作主会话总量的一部分。仅在 `delegate.enabled` 为 `true` 时有意义。
+
+### `delegate.maxDepth`
+
+- **类型：** 整数 ≥ 1
+- **默认值：** `2`
+- **状态：** 🟢 ACTIVE
+- **说明：** `acp_delegate` 的最大嵌套深度。深度表示会话距主会话的层数（主会话 = 0）；只有当自身深度**低于**该限制时才能再委派，因此*处于*该深度的会话成为叶子、不能再委派。默认 `2` 允许 主 → delegate → 二级 delegate；设为 `1` 可实现编排者 / 叶子工作者模式（delegate 不再嵌套）。解析后的限制值通过内部环境变量 `PI_ACP_DELEGATE_MAX_DEPTH` 传递给子进程，即使某个子进程加载了不同的项目级 `acp.json`，也能约束整棵委派树。非法值（非整数、`< 1`）回退到默认值并记录警告日志。环境变量覆盖：`PI_ACP_DELEGATE_MAX_DEPTH`（优先于本键）。
+
+### `delegate.syncTimeoutMinutes`
+
+- **类型：** number（分钟，支持小数）或 `0` / `null`
+- **默认值：** `5`
+- **状态：** 🟢 ACTIVE
+- **说明：** **同步** `acp_delegate` 调用的硬超时——子进程未在该时间窗内结束即被杀死（SIGTERM）。设为 `0`（或 `null`）可禁用同步硬超时。支持小数分钟（如 `0.5` = 30 秒）。非法值回退到默认值并记录警告日志。环境变量覆盖：`PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES`（`0` 禁用）。
+
+### `delegate.idleTimeoutMinutes`
+
+- **类型：** number（分钟，支持小数）或 `0` / `null`
+- **默认值：** `5`
+- **状态：** 🟢 ACTIVE
+- **说明：** 异步 delegate 子进程的闲置看门狗：若子进程在该时长内**没有任何输出**，即视为挂死并强制结束。这是防止卡住的子进程长期占用 stdout 管道的主要防线。设为 `0`（或 `null`）可禁用它——ACP 会记录一条醒目的警告；`acp_delegate_cancel` 仍可作为手动逃生通道。支持小数分钟。非法值回退到默认值并记录警告日志。环境变量覆盖：`PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES`（`0` 禁用）。
+
+### `delegate.asyncTimeoutMinutes`
+
+- **类型：** number（分钟，支持小数）或 `0` / `null`
+- **默认值：** `30`
+- **状态：** 🟢 ACTIVE
+- **说明：** **异步** delegate 子进程的绝对硬上限，与是否活跃无关。设为 `0`（或 `null`）可让长任务不受绝对上限约束——闲置看门狗仍然生效（除非另行禁用）。支持小数分钟。非法值回退到默认值并记录警告日志。环境变量覆盖：`PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES`（`0` 禁用）。
+
+### `delegate.maxConcurrent`
+
+- **类型：** number（整数 ≥ 1）
+- **默认值：** unlimited（不限制并发）
+- **状态：** 🟢 ACTIVE
+- **环境变量覆盖：** `PI_ACP_DELEGATE_MAX_CONCURRENT`（优先于本键）
+- **说明：** 限制**同时运行**的后台（`async: true`）delegate 数量。达到上限后，后续启动进入 FIFO 队列，有空位时自动开始——不会丢弃，只是排队等待。设为 `1` 可强制严格串行执行（适合低性能机器上并行子代理争抢 CPU 而超时的场景）。同步（`async: false`）调用始终立即运行，不受此上限影响。无效值（非整数或 `< 1`）会带警告回退到 unlimited，而不是让会话失败。仅在 `delegate.enabled` 为 `true` 时有意义。
+
+### `delegate.thinkingLevel`
+
+- **类型：** 字符串枚举 `"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"`
+- **默认值：** _（未设置——每个子进程使用 Pi 自身默认值）_
+- **状态：** 🟢 ACTIVE
+- **说明：** 全局默认 thinking level。当 per-call `thinkingLevel` 与角色自身的 `thinkingLevel`（见 `delegate.agents`）都未设置时生效。所有层级都未设置时不传 `--thinking`，每个子进程使用 Pi 自身默认值。非法值会被忽略并记录警告（不会导致运行失败）。per-call 的 `acp_delegate({ thinkingLevel })` 始终优先于该全局值。
+
+### `delegate.agents`
+
+- **类型：** 对象——角色名 → `{ model?, thinkingLevel? }` 的映射
+- **默认值：** _（未设置——所有角色继承父模型 + Pi 默认值）_
+- **状态：** 🟢 ACTIVE
+- **说明：** 按角色配置默认值，便于长期自动化为不同 delegate 角色固定更便宜或更强的模型与 thinking level，而无需主 Agent 每次调用都填写。键为角色名（`reviewer`、`researcher`、`worker`、`planner`、`oracle`，或任意自定义角色）。每个值可设置：
+  - `model`（`"provider/id"`）——该角色的默认模型。优先级：per-call `model` > 该角色的 `model` > 父 Agent 当前模型。非合法 `"provider/id"` 的值会被忽略。若配置的模型在当前 registry 中不存在，则回退到父模型并记录警告——绝不导致失败。
+  - `thinkingLevel`——该角色的默认 thinking level（枚举同 `delegate.thinkingLevel`）。优先级：per-call > 角色 > 全局。
+
+```jsonc
+{
+  "delegate": {
+    "thinkingLevel": "low",
+    "agents": {
+      "reviewer": { "model": "opencode-go/deepseek-v4-flash", "thinkingLevel": "high" },
+      "worker":   { "model": "anthropic/claude-sonnet-4-5" },
+      "oracle":   { "model": "openai/gpt-5", "thinkingLevel": "xhigh" }
+    }
+  }
+}
+```
+
 
 ---
 
@@ -287,6 +375,57 @@
 
 ---
 
+## 工具调用重复熔断
+
+`repetitionGuard` 键用于打断**字节级完全相同的工具调用死循环**。小模型在贪心解码下可能卡住，逐轮重复发出完全一致的 `(工具调用 → 工具返回)` 对——例如带着相同参数几十次调用 `acp_status {"scope":"uncompressed","view":"ranges"}`，而上下文每轮都在增长。token 级惩罚无法打破这种循环，因为它是**序列级吸引子**（重复跨越轮次边界），而非序列内的 token 重复。
+
+该熔断器把每次工具调用指纹化为 `sha1(toolName + canonical-JSON(args))`，其中 JSON 序列化会对对象键排序，因此只比较*参数*本身——键顺序与返回内容都不影响判定。它在会话内跟踪当前连续相同调用的长度：
+
+- 连续相同调用达到 **`warn`** 次时，在对应工具返回尾部追加一条强警告，提示模型停止重复该调用；
+- 连续相同调用达到 **`abort`** 次时，**拦截**该调用（不执行）、中止本轮，并在终端弹出通知。
+
+任何参数变化（或切换到另一个工具）都会重置计数；一条真实用户消息也会重置（扩展自己发送的消息不会重置）。
+
+### `repetitionGuard`
+
+- **类型：** boolean \| object
+- **默认值：** `true`
+- **状态：** 🟢 ACTIVE
+- **说明：** 启用/禁用重复熔断并调整阈值。`repetitionGuard: false` 完全关闭该功能。object 形式（任意子集）：
+
+  ```json
+  {
+    "repetitionGuard": {
+      "enabled": true,
+      "warn": 3,
+      "abort": 5
+    }
+  }
+  ```
+
+### `repetitionGuard.enabled`
+
+- **类型：** boolean
+- **默认值：** `true`
+- **状态：** 🟢 ACTIVE
+- **说明：** 开关。`false`（或顶层 `repetitionGuard: false`）禁用所有重复检测。
+
+### `repetitionGuard.warn`
+
+- **类型：** number
+- **默认值：** `3`
+- **状态：** 🟢 ACTIVE
+- **说明：** 连续字节级相同调用达到该次数后，在工具返回尾部追加警告。最小为 1。
+
+### `repetitionGuard.abort`
+
+- **类型：** number
+- **默认值：** `5`
+- **状态：** 🟢 ACTIVE
+- **说明：** 连续字节级相同调用达到该次数后，拦截该调用并中止本轮。必须大于 `warn`；若误配成更小值会被向上钳制到 `warn + 1`。
+
+---
+
 ## 压缩调优
 
 `compress` 子对象包含三个阈值，构成上下文管理的**三级递进**。它们控制模型*何时*被 nudge 压缩，以及大输出*何时*被强制截断以维持会话存活。阈值越低，扩展压缩得越早、越激进。
@@ -316,7 +455,8 @@
 - **类型：** `number`
 - **默认值：** `50000`
 - **状态：** 🟢 ACTIVE
-- **说明：** 控制**软**压缩 nudge 频率的 token 增长阈值。每当积累约这么多新可压缩内容时，触发一次软 nudge。值越低模型被 nudge 压缩的频率越高；值越低频率越低。此设置只控制*基于增长的* nudge——用量越过 `compress.maxContextLimit` 后，强制 nudge 接管，不受此设置影响。映射到内核设置 `nudge.growthFloor` 和 `nudge.growthCap`。
+- **说明：** 控制**软**压缩 nudge 频率的 token 增长阈值。每当积累约这么多新可压缩内容时，触发一次软 nudge。值越低模型被 nudge 压缩的频率越高；值越高频率越低。此设置只控制*基于增长的* nudge——用量越过 `compress.maxContextLimit` 后，强制 nudge 接管，不受此设置影响。映射到内核设置 `nudge.growthFloor` 和 `nudge.growthCap`。
+- **同轮重注入：** 同一用户轮内 nudge 至多注入一次，但上下文自上次注入后又增长满一个增长门槛（镜像内核防抖 cadence：`max(minGrowthFloor, minGrowthRatio × adaptiveGrowth)`，默认 22.5K token）时，会在同轮重新注入新提醒（issue #269：模型忽略 78% nudge 后，原来会一直沉默到 95% emergency 机械截断）。成功 compress 后增长基线重锚到新（更小）刻度，压缩后重新长回压力带不会被压缩前峰值压制。
 
 ### `compress.providers` —— 按 provider / 按 model 覆盖
 
@@ -421,3 +561,38 @@ provider 的 key 是 **Pi provider 名**(如 `"anthropic"`、`"openai"`、`"zhip
 - **默认值：** `~/.pi/acp.log`
 - **状态：** 🟢 ACTIVE
 - **说明：** 覆盖日志文件路径。默认情况下，结构化日志写入 `~/.pi/acp.log`（文件在 10MB 时轮转为 `~/.pi/acp.log.old`）。指向不同位置可为每个项目或每次运行保留独立日志。
+
+### `PI_ACP_DELEGATE_MAX_DEPTH`
+
+- **类型：** 整数 ≥ 1
+- **默认值：** *(未设置——遵循 `delegate.maxDepth`，再回退到 2)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 不编辑配置文件，为单个会话覆盖 delegate 最大嵌套深度。优先于 `delegate.maxDepth`。解析后的值会被向下传递到整棵委派树。请勿在委派树中间手动设置它：这也是 ACP 用来把*生效限制*传入子进程的内部变量。
+
+### `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES`
+
+- **类型：** number（分钟）或 `0`
+- **默认值：** *(未设置——遵循 `delegate.syncTimeoutMinutes`，再回退到 5)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 覆盖同步 `acp_delegate` 的硬超时。设为 `0` 可为单个会话禁用同步硬超时。优先于 `delegate.syncTimeoutMinutes`。
+
+### `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES`
+
+- **类型：** number（分钟）或 `0`
+- **默认值：** *(未设置——遵循 `delegate.idleTimeoutMinutes`，再回退到 5)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 覆盖异步闲置看门狗的时间窗。设为 `0` 可为单个会话禁用闲置看门狗（ACP 会记录警告；`acp_delegate_cancel` 仍可作为手动逃生通道）。优先于 `delegate.idleTimeoutMinutes`。
+
+### `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES`
+
+- **类型：** number（分钟）或 `0`
+- **默认值：** *(未设置——遵循 `delegate.asyncTimeoutMinutes`，再回退到 30)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 覆盖异步 delegate 子进程的绝对硬上限。设为 `0` 可让长任务不受绝对上限约束（闲置看门狗仍然生效，除非另行禁用）。优先于 `delegate.asyncTimeoutMinutes`。
+
+### `PI_ACP_DELEGATE_MAX_CONCURRENT`
+
+- **类型：** integer（≥ 1）
+- **默认值：** *(未设置——上限遵循 `delegate.maxConcurrent`，再否则 unlimited)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 覆盖后台（`async`）delegate 并发上限。**优先于** `delegate.maxConcurrent`。设为 `1` 强制串行执行。无效值会带警告回退到下一个来源（最终 unlimited），而不是让会话失败。
