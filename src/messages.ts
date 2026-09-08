@@ -12,6 +12,7 @@ type AnyMessage = {
   command?: string;
   output?: unknown;
   summary?: string;
+  stopReason?: string;
 };
 
 const REF_TAG_SOURCE = "(?:\x3cacp\\s[^>]*\x3em\\d{5}\x3c/acp\x3e|\\[m\\d{1,5}\\])";
@@ -21,6 +22,19 @@ const TRAILING_REF_TAG = new RegExp(`\\n*${REF_TAG_SOURCE}\\s*$`);
 // /acp panels are UI-only transcript output (issue #255): persistent in the
 // session, but never projected into the sent view.
 export const ACP_STATUS_CUSTOM_TYPE = "acp-status";
+
+// An assistant turn aborted or errored by the user never ran its tools, so its
+// tool_calls blocks have no matching tool_result. Sending them is an invalid
+// sequence for OpenAI-compatible providers (openai-completions 400s on
+// tool_calls with no following tool message) and is the hook that drags the model
+// back into re-issuing the abandoned call (issue #330). Keying off stopReason —
+// not a "missing toolResult" scan — is deliberate: OMP execution roles and
+// evicted/undo fixtures carry no stopReason, so a result-presence scan would
+// false-positive on their (legitimately paired) tool calls.
+const INTERRUPTED_STOP_REASONS = new Set(["aborted", "error"]);
+function wasInterrupted(msg: AnyMessage): boolean {
+  return typeof msg.stopReason === "string" && INTERRUPTED_STOP_REASONS.has(msg.stopReason);
+}
 
 export function entriesToCoreMessages(entries: SessionEntry[]): CoreMessage[] {
   const out: CoreMessage[] = [];
@@ -59,7 +73,12 @@ function projectMessage(message: AgentMessage, id: string): CoreMessage[] {
     }];
   }
   if (role === "assistant") {
-    const calls = allToolCalls(msg.content);
+    let calls = allToolCalls(msg.content);
+    // Interrupted turn → its tools never ran → drop the unmatched tool_calls so
+    // the sent view carries no dangling tool_use (see wasInterrupted). If the
+    // dropped call was the only content, this falls through to the text path
+    // below, which drops the turn too when there is no visible text.
+    if (wasInterrupted(msg)) calls = [];
     if (calls.length > 0) {
       const textParts = extractText(msg.content);
       if (calls.length === 1) {

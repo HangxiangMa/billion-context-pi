@@ -37,6 +37,7 @@ import {
   throttleDelayMs,
 } from "./throttle-retry.js";
 import { defaultCountTokens } from "acp-kernel";
+import { COMPRESS_LOOP_CORRECT_THRESHOLD, buildCompressLoopText } from "./compress-loop.js";
 import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
 import { applyOutputHeadroom, inspectOverflowMessage } from "./overflow-selfheal.js";
 import { isOmpHost, OMP_UNSUPPORTED_MESSAGE } from "./omp.js";
@@ -412,6 +413,11 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     // must lift the cap on this same fire).
     const compressOutcomes = collectCompressOutcomes(entries, turnStartIndex(entries));
     const outcome = compressOutcomes.length > 0 ? runtime.noteCompressOutcomes(turnKey, compressOutcomes) : null;
+    // Failed/no-op compress attempts counted so far THIS user turn (0 when the
+    // key doesn't match the tracked turn). Drives both nudge suppression and the
+    // independent stop-signal below. Read AFTER noteCompressOutcomes above so it
+    // reflects the newest outcome on this same fire.
+    const compressFails = runtime.compressFailCountFor(turnKey);
 
     // Growth-aware re-inject bookkeeping (issue #269) runs on EVERY context
     // event, not only when the kernel wants to inject: the drop re-anchor
@@ -475,9 +481,12 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       // keeps usage pinned at emergency). Once this turn burned
       // MAX_COMPRESS_ATTEMPTS attempts, stop re-injecting the nudge — the
       // kernel's emergency truncation still shrinks context mechanically.
-      const retryCapped = runtime.compressRetryCappedFor(turnKey);
+      // Nudge suppression engages on the FIRST failed/no-op compress attempt this
+      // turn, not only at the MAX_COMPRESS_ATTEMPTS cap: once the model has chased a
+      // failing compression, re-pushing "compress more" reinforces the loop instead of
+      // helping — the failure toolResult already carries actionable refs (#330).
       const reInjectReady = shownAt === undefined || tokenCount - shownAt >= reInjectFloor;
-      const alreadyShown = retryCapped || (!emergency && runtime.nudgeShownFor(turnKey) && !reInjectReady);
+      const alreadyShown = compressFails >= 1 || (!emergency && runtime.nudgeShownFor(turnKey) && !reInjectReady);
       if (!alreadyShown) {
         rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active), runtime.prompts));
         const rendered = renderNudgeText(turn.nudge, runtime.prompts);
@@ -502,6 +511,12 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       if (ctx.hasUI) {
         ctx.ui.notify(`[ACP] compress failed ${outcome.count}× this turn — nudge paused until the next user message (emergency truncation still active).`);
       }
+    }
+
+    if (compressFails >= COMPRESS_LOOP_CORRECT_THRESHOLD) {
+      rebuilt.push({ role: "user", content: [{ type: "text", text: buildCompressLoopText(compressFails) }], timestamp: Date.now() } as AgentMessage);
+      logWarn("nudge", { sid, event: "compress-loop-correction", failures: compressFails });
+      debug.event("compress-loop-correction", { sid, turnKey, failures: compressFails });
     }
 
     // Always return the transformed array: every message needs its [mNNNNN] ref

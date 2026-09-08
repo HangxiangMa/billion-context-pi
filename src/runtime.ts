@@ -88,6 +88,11 @@ export interface AcpRuntime {
    *  compress calls — used to stop re-injecting the (dedup-exempt) emergency
    *  nudge that would otherwise keep looping no-op compressions (issue #6). */
   compressRetryCappedFor(turnKey: string): boolean;
+  /** Failed/no-op compress calls counted for this turn, or 0 when turnKey does
+   *  not match the currently tracked turn. Distinguishes "no failure yet" from
+   *  "hard-capped" so nudge suppression can engage on the first failed attempt
+   *  rather than only at MAX_COMPRESS_ATTEMPTS (issue #330). */
+  compressFailCountFor(turnKey: string): number;
   clearNudgeTracking(): void;
   clearCompressRetryTracking(): void;
   liveContextLimit(ctx: ExtensionContext): number;
@@ -354,6 +359,10 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     return compressFailTurnKey === turnKey && compressFailCount >= MAX_COMPRESS_ATTEMPTS;
   }
 
+  function compressFailCountFor(turnKey: string): number {
+    return compressFailTurnKey === turnKey ? compressFailCount : 0;
+  }
+
   function clearCompressRetryTracking(): void {
     compressOutcomeSeen.clear();
     compressFailTurnKey = null;
@@ -457,4 +466,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
 
   let refused = false;
   let refusalMessage: string | null = null;
-  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k, t) => { nudgeShownTurns.add(k); if (t !== undefined) nudgeShownTokens.set(k, t); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), nudgeShownTokensFor: (k) => nudgeShownTokens.get(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); nudgeShownTokens.clear(); }, clearNudgeTokenStamps: () => nudgeShownTokens.clear(), noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale };}
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k, t) => { nudgeShownTurns.add(k); if (t !== undefined) nudgeShownTokens.set(k, t); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), nudgeShownTokensFor: (k) => nudgeShownTokens.get(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); nudgeShownTokens.clear(); }, clearNudgeTokenStamps: () => nudgeShownTokens.clear(), noteCompressOutcomes, compressRetryCappedFor, compressFailCountFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale };}
