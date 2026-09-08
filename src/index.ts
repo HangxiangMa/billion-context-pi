@@ -38,7 +38,7 @@ import {
 } from "./throttle-retry.js";
 import { defaultCountTokens } from "acp-kernel";
 import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
-import { applyOutputHeadroom, inspectOverflowMessage } from "./overflow-selfheal.js";
+import { applyOutputHeadroom, inspectOverflowMessage, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
 import { isOmpHost, OMP_UNSUPPORTED_MESSAGE } from "./omp.js";
 import { isBiliProxyBaseUrl, PROXY_STAND_DOWN_MESSAGE } from "./proxy-detect.js";
 
@@ -271,16 +271,19 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
         config = { ...config, modelContextLimit: learnedWindow };
         logInfo("overflow-selfheal", { sid, modelId, event: "window-recenter", resolved: configBase.modelContextLimit, learned: learnedWindow });
       }
-      // Output headroom: reserve the model's max output budget from the window
-      // so the kernel's nudge/truncate bands sit below (window - maxTokens) —
-      // the context then always leaves room for the model's reply, preventing
-      // the "context + output > window" overflow on a small window. Applied to
-      // the (possibly re-centered) window above; never mutates the shared
-      // config. Anthropic is exempt (see applyOutputHeadroom).
-      const beforeHeadroom = config.modelContextLimit;
-      config = applyOutputHeadroom(config, ctx.model);
-      if (config.modelContextLimit !== beforeHeadroom) {
-        logInfo("overflow-selfheal", { sid, event: "output-headroom", before: beforeHeadroom, after: config.modelContextLimit, maxOutput: (ctx.model as { maxTokens?: number } | undefined)?.maxTokens ?? 0 });
+      // Output headroom: reserve the model's output budget from the window so
+      // the kernel's nudge/truncate bands sit below (window - reserved) and
+      // the context leaves room for the model's reply. The reservation is
+      // capped at outputHeadroomMaxPct * window (default 25%, issue #207):
+      // reserving the FULL registered maxTokens capability halves the input
+      // budget on models whose maxTokens is a large share of the window.
+      // Applied to the (possibly re-centered) window above; never mutates the
+      // shared config. Anthropic is exempt (see applyOutputHeadroom).
+      const headroomCap = resolveOutputHeadroomCap(runtime.adapter.outputHeadroomMaxPct);
+      const fullWindow = config.modelContextLimit;
+      config = applyOutputHeadroom(config, ctx.model, headroomCap);
+      if (config.modelContextLimit !== fullWindow) {
+        logInfo("overflow-selfheal", { sid, event: "output-headroom", before: fullWindow, after: config.modelContextLimit, maxOutput: (ctx.model as { maxTokens?: number } | undefined)?.maxTokens ?? 0, cap: headroomCap });
       }
       const coveredIds = collectCoveredMessageIds(state);
       // Nudge arbitration on the SENT-VIEW scale: CJK-aware estimate over the
@@ -367,6 +370,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
         tokens: tokenCount,
         pct: config.modelContextLimit > 0 ? Number(((tokenCount / config.modelContextLimit) * 100).toFixed(2)) : null,
         limit: config.modelContextLimit,
+        ...(fullWindow !== config.modelContextLimit ? { fullWindow } : {}),
         nudge: turn.nudge?.shouldInject ? (turn.nudge.breakdown?.emergencyOverride === 1 ? "emergency" : "active") : "idle",
         nudgeReason: turn.nudge?.reason ?? null,
         blocks: turn.state.blocks.length,

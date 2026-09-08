@@ -5,7 +5,7 @@ import { defaultCountTokens, parseBlockIdArg, collectBlockContent } from "acp-ke
 import { getSystemPromptText } from "./compat.js";
 import { collectCoveredMessageIds, estimateTokens, collectImageTokens, modelSupportsImages, adjustedTokenCount } from "./tokens.js";
 import { usageAnchorPredatesCompression } from "./floor-stale.js";
-import { applyOutputHeadroom } from "./overflow-selfheal.js";
+import { applyOutputHeadroom, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
 import { buildStatusPanel } from "acp-kernel/panel";
 import { getDelegateUsage } from "./delegate-tool.js";
 import { openFleetInspector } from "./fleet-inspector.js";
@@ -146,7 +146,7 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   // Measure every panel percentage against the SAME real request limit the live
   // context transform uses (window − output headroom), not the full window
   // (issue #267).
-  const config = applyOutputHeadroom(runtime.configFor(ctx), ctx.model);
+  const config = applyOutputHeadroom(runtime.configFor(ctx), ctx.model, resolveOutputHeadroomCap(runtime.adapter.outputHeadroomMaxPct));
   // Use pi's real context usage (anchored on provider usage) only for the
   // panel's footer-scale display line; see sentTokens below for arbitration.
   const realUsage = ctx.getContextUsage?.();

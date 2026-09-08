@@ -10,6 +10,7 @@ const { makeCommands } = await import("../src/commands.js");
 
 function fakeRuntime(): AcpRuntime {
   return {
+    adapter: {},
     configFor: () => ({ modelContextLimit: 1_000_000 }),
     stateFor: async () => ({
       state: { blocks: [], stats: { tokensCompressed: 0 }, messageRefs: { byRaw: {}, byRef: {} } },
