@@ -1,7 +1,11 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { FleetRunView } from "./delegate-tool.js";
 import { initFooterStatus, updateFooterStatus, disposeFooterStatus } from "./footer-status.js";
 
 const DELEGATE_WIDGET_KEY = "billion-context-pi-delegates";
+// Bridge channel so a host (pi-mine's task-dock) can render these runs in a
+// unified panel instead of this belowEditor widget. Payload: { runs: BridgeRun[] }.
+const BRIDGE_CHANNEL = "billion-context-pi:delegate:v1";
 const REFRESH_MS = 500;
 const MAX_TASK_LEN = 48;
 
@@ -13,11 +17,36 @@ interface WidgetRun {
 }
 
 type RunsSnapshot = () => WidgetRun[];
+type FleetSnapshot = () => FleetRunView[];
 
 let ui: ExtensionContext["ui"] | undefined;
+let pi: ExtensionAPI | undefined;
 let timer: ReturnType<typeof setInterval> | undefined;
 let lastRenderKey = "";
 let runsSnapshot: RunsSnapshot | undefined;
+let fleetSnapshot: FleetSnapshot | undefined;
+
+function widgetSuppressed(): boolean {
+  return process.env.PI_ACP_DELEGATE_WIDGET_OFF === "1";
+}
+
+function emitBridge(): void {
+  if (!pi?.events || !fleetSnapshot) return;
+  try {
+    const runs = fleetSnapshot().map((r) => ({
+      id: r.runId,
+      agent: r.agent,
+      task: r.task,
+      status: r.status,
+      startedAt: r.startedAt,
+      finishedAt: r.finishedAt,
+      tokens: r.usage ? { input: r.usage.input, output: r.usage.output } : undefined,
+    }));
+    pi.events.emit(BRIDGE_CHANNEL, { runs });
+  } catch {
+    // best-effort UI hint — never let it break delegation
+  }
+}
 
 function truncateTask(task: string): string {
   const oneLine = task.replace(/\n/g, " ").trim();
@@ -62,13 +91,17 @@ function clearWidget(): void {
 
 function refresh(): void {
   if (!ui) return;
+  // Bridge fires every tick regardless of the widget-render debounce below —
+  // a host dock needs fresh elapsed-time even when our own renderKey hasn't
+  // changed at second resolution.
+  emitBridge();
   const runs = runsSnapshot ? runsSnapshot() : [];
   if (runs.length === 0) {
     // Empty list: clear the widget and stop the timer so an idle TUI does not
     // tick forever. The next poke() (on a new spawn) restarts it.
     if (lastRenderKey !== "") {
       lastRenderKey = "";
-      clearWidget();
+      if (!widgetSuppressed()) clearWidget();
     }
     // Final accumulated usage must still be shown after the last delegate
     // finishes, so refresh the footer before stopping the timer.
@@ -83,15 +116,20 @@ function refresh(): void {
   const renderKey = renderKeyFor(sorted);
   if (renderKey === lastRenderKey) return;
   lastRenderKey = renderKey;
-  const lines = renderLines(sorted);
-  try {
-    ui.setWidget(DELEGATE_WIDGET_KEY, lines, { placement: "belowEditor" });
-  } catch {
-    // Real teardown goes through dispose() (session_shutdown). setWidget does
-    // not throw "stale" — if it ever throws here, best effort is to clear ui
-    // so the next setContext rebinds.
-    ui = undefined;
-    stopTimer();
+  // PI_ACP_DELEGATE_WIDGET_OFF=1 lets a host (pi-mine's task-dock, via the
+  // bridge above) own delegate rows instead — this belowEditor panel would
+  // otherwise duplicate them.
+  if (!widgetSuppressed()) {
+    const lines = renderLines(sorted);
+    try {
+      ui.setWidget(DELEGATE_WIDGET_KEY, lines, { placement: "belowEditor" });
+    } catch {
+      // Real teardown goes through dispose() (session_shutdown). setWidget does
+      // not throw "stale" — if it ever throws here, best effort is to clear ui
+      // so the next setContext rebinds.
+      ui = undefined;
+      stopTimer();
+    }
   }
   // Delegates still running: keep the footer usage line fresh too (deduped
   // inside updateFooterStatus, so this is O(1) per 500ms tick).
@@ -99,7 +137,7 @@ function refresh(): void {
 }
 
 export const delegateStatusWidget = {
-  setContext(ctx: ExtensionContext, snapshot: RunsSnapshot): void {
+  setContext(ctx: ExtensionContext, snapshot: RunsSnapshot, extApi?: ExtensionAPI, fleet?: FleetSnapshot): void {
     // Only the interactive TUI renders widgets. RPC mode has hasUI === true but
     // its setWidget just emits extension_ui_request notifications to an RPC
     // client — useless here and a needless ~1Hz chatter. print/json have
@@ -108,7 +146,9 @@ export const delegateStatusWidget = {
     if (ctx.mode !== "tui") return;
     initFooterStatus(ctx);
     ui = ctx.ui;
+    pi = extApi;
     runsSnapshot = snapshot;
+    fleetSnapshot = fleet;
     if (!timer) {
       timer = setInterval(refresh, REFRESH_MS);
       timer.unref?.();
@@ -120,6 +160,7 @@ export const delegateStatusWidget = {
     clearWidget();
     disposeFooterStatus();
     ui = undefined;
+    pi = undefined;
     lastRenderKey = "";
   },
   poke(): void {

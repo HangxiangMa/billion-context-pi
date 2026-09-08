@@ -16,7 +16,7 @@ import { makeCompressTool, isCompressSuccessText, isCompressNoopText } from "./c
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
-import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage, setDelegatePolicy, setDelegateDefaults, setDelegateNotifyIfRead, markDelegateResultRead, markDelegateRunReadByCommand } from "./delegate-tool.js";
+import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, fleetRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage, setDelegatePolicy, setDelegateDefaults, setDelegateNotifyIfRead, markDelegateResultRead, markDelegateRunReadByCommand } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages, extractText } from "./messages.js";
 import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
@@ -227,8 +227,10 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     // Bind the TUI status widget for async delegates. The widget reads the
     // in-memory runs Map (via runningRunsSnapshot) and renders a live list of
     // running delegates below the editor. Only the interactive TUI has a UI;
-    // rpc/json/print have hasUI=false and the call is a no-op.
-    delegateStatusWidget.setContext(ctx, runningRunsSnapshot);
+    // rpc/json/print have hasUI=false and the call is a no-op. `pi` +
+    // fleetRunsSnapshot let it also broadcast full run state over
+    // pi.events for a host dock (see fleet-widget.ts's emitBridge).
+    delegateStatusWidget.setContext(ctx, runningRunsSnapshot, pi, fleetRunsSnapshot);
   });
   pi.on("session_shutdown", (_event, ctx) => {
     runtime.clearDeadCompress(ctx.sessionManager.getSessionId());
