@@ -1,6 +1,13 @@
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
-import { createWriteStream, existsSync, type WriteStream } from "node:fs";
-import { mkdir, mkdtemp, writeFile, rm, appendFile, readFile, copyFile } from "node:fs/promises";
+import {
+  createWriteStream,
+  existsSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+  type WriteStream,
+} from "node:fs";
+import { mkdir, mkdtemp, writeFile, rm, appendFile, readFile, copyFile, readdir, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve as resolvePath } from "node:path";
 import { Type, type Static } from "typebox";
@@ -25,6 +32,168 @@ const NOTIFY_COALESCE_MS = 2_000;
 const NOTIFY_COALESCE_MAX_MS = 10_000;
 const SESSION_EXT = ".session.jsonl";
 const ACTIVITY_TAIL_CHARS = 400;
+const DELEGATE_OWNER_EXT = ".owner.json";
+
+type DelegateOwnerRecord = {
+  runId: string;
+  ownerPid: number;
+  ownerStartIdentity?: string;
+  childPid: number;
+  startedAt: number;
+};
+
+function processStartIdentity(pid: number): string | undefined {
+  if (process.platform === "win32") return undefined;
+  try {
+    const stat = readFileSync(`/proc/${String(pid)}/stat`, "utf8");
+    const afterCommand = stat.lastIndexOf(") ");
+    if (afterCommand < 0) return undefined;
+    return stat.slice(afterCommand + 2).trim().split(/\s+/)[19];
+  } catch {
+    return undefined;
+  }
+}
+
+function ownerFile(runId: string): string {
+  return join(OUT_DIR, `${runId}${DELEGATE_OWNER_EXT}`);
+}
+
+function writeDelegateOwner(runId: string, childPid: number, startedAt: number): void {
+  const record: DelegateOwnerRecord = {
+    runId,
+    ownerPid: process.pid,
+    ownerStartIdentity: processStartIdentity(process.pid),
+    childPid,
+    startedAt,
+  };
+  writeFileSync(ownerFile(runId), `${JSON.stringify(record)}\n`, { mode: 0o600 });
+}
+
+async function removeDelegateOwner(runId: string): Promise<void> {
+  // A delegate can exit while a tool it spawned remains in the detached
+  // process group. Keep the sidecar until the whole group is gone so normal
+  // shutdown and the next Pi startup can still reap that descendant.
+  if (process.platform !== "win32") {
+    try {
+      const record = JSON.parse(await readFile(ownerFile(runId), "utf8")) as Partial<DelegateOwnerRecord>;
+      if (typeof record.childPid === "number" && record.childPid > 0) {
+        try {
+          process.kill(-record.childPid, 0);
+          return;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") return;
+        }
+      }
+    } catch {
+      // Missing or malformed sidecars are already harmless.
+    }
+  }
+  await unlink(ownerFile(runId)).catch(() => {});
+}
+
+async function signalOwnedDelegateGroups(signal: NodeJS.Signals): Promise<string[]> {
+  if (process.platform === "win32") return [];
+  let names: string[];
+  try {
+    names = await readdir(OUT_DIR);
+  } catch {
+    return [];
+  }
+  const signalled: string[] = [];
+  await Promise.all(
+    names
+      .filter((name) => name.endsWith(DELEGATE_OWNER_EXT))
+      .map(async (name) => {
+        const path = join(OUT_DIR, name);
+        try {
+          const record = JSON.parse(await readFile(path, "utf8")) as Partial<DelegateOwnerRecord>;
+          if (record.ownerPid !== process.pid || typeof record.childPid !== "number" || record.childPid <= 0) return;
+          try {
+            process.kill(-record.childPid, signal);
+          } catch {
+            try { process.kill(record.childPid, signal); } catch { /* already gone */ }
+          }
+          signalled.push(record.runId ?? name);
+        } catch {
+          // Ignore a sidecar that is being written or removed concurrently.
+        }
+      }),
+  );
+  return signalled;
+}
+
+function signalOwnedDelegateGroupsSync(signal: NodeJS.Signals): void {
+  if (process.platform === "win32") return;
+  try {
+    for (const name of readdirSync(OUT_DIR)) {
+      if (!name.endsWith(DELEGATE_OWNER_EXT)) continue;
+      try {
+        const record = JSON.parse(readFileSync(join(OUT_DIR, name), "utf8")) as Partial<DelegateOwnerRecord>;
+        if (record.ownerPid !== process.pid || typeof record.childPid !== "number" || record.childPid <= 0) continue;
+        try {
+          process.kill(-record.childPid, signal);
+        } catch {
+          try { process.kill(record.childPid, signal); } catch { /* already gone */ }
+        }
+      } catch {
+        // Ignore a sidecar that is being written or removed concurrently.
+      }
+    }
+  } catch {
+    // OUT_DIR may not exist during early startup or crash handling.
+  }
+}
+
+/** Reap delegate process groups left behind when their Pi owner crashed. */
+export async function reapOrphanedDelegates(): Promise<void> {
+  if (process.platform === "win32") return;
+  let names: string[];
+  try {
+    names = await readdir(OUT_DIR);
+  } catch {
+    return;
+  }
+  await Promise.all(
+    names
+      .filter((name) => name.endsWith(DELEGATE_OWNER_EXT))
+      .map(async (name) => {
+        const path = join(OUT_DIR, name);
+        try {
+          const record = JSON.parse(await readFile(path, "utf8")) as Partial<DelegateOwnerRecord>;
+          const ownerPid = record.ownerPid;
+          const childPid = record.childPid;
+          if (typeof ownerPid !== "number" || !Number.isInteger(ownerPid) || typeof childPid !== "number" || !Number.isInteger(childPid)) return;
+          // Never reap a live owner. This directory is shared by concurrent Pi
+          // instances, so runId alone is not an ownership signal.
+          if (ownerPid === process.pid) return;
+          try {
+            process.kill(ownerPid, 0);
+            const recordedIdentity = record.ownerStartIdentity;
+            const liveIdentity = recordedIdentity ? processStartIdentity(ownerPid) : undefined;
+            // A matching PID is not enough: it may now belong to a new Pi
+            // process. Legacy sidecars without an identity remain conservative
+            // and are not reaped while their PID is live.
+            if (!recordedIdentity || !liveIdentity || recordedIdentity === liveIdentity) return;
+            logWarn("delegate", { event: "owner-pid-reused", runId: record.runId, ownerPid });
+          } catch (error) {
+            // EPERM means owner exists but is not signalable; only ESRCH
+            // proves the owner process is gone.
+            if ((error as NodeJS.ErrnoException).code !== "ESRCH") return;
+            // Owner is gone: terminate its detached delegate process group.
+          }
+          try {
+            process.kill(-childPid, "SIGKILL");
+          } catch {
+            try { process.kill(childPid, "SIGKILL"); } catch { /* already gone */ }
+          }
+          await unlink(path).catch(() => {});
+          logWarn("delegate", { event: "orphan-reaped", runId: record.runId, childPid, ownerPid });
+        } catch {
+          // Ignore a partially-written sidecar; next startup can retry it.
+        }
+      }),
+  );
+}
 
 /** Stdin for a resumed run: the original task and all earlier tool calls are
  *  already in the restored session history, so the child must continue, not
@@ -246,32 +415,36 @@ interface DelegateRun {
 }
 const runs = new Map<string, DelegateRun>();
 let delegatesShuttingDown = false;
-const shutdownKillTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-function clearShutdownKillTimer(runId: string): void {
-  const timer = shutdownKillTimers.get(runId);
-  if (!timer) return;
-  clearTimeout(timer);
-  shutdownKillTimers.delete(runId);
+function delegateHasExited(child: ChildProcess): boolean {
+  return (child.exitCode !== null && child.exitCode !== undefined) || Boolean(child.signalCode);
 }
 
-function scheduleShutdownKill(run: DelegateRun): void {
-  clearShutdownKillTimer(run.runId);
-  const timer = setTimeout(() => {
-    shutdownKillTimers.delete(run.runId);
-    const child = run.child;
-    // A cancelled run is intentionally excluded from the normal watchdog's
-    // escalation path. Keep shutdown escalation independent of run.status.
-    if (!child || child.exitCode !== null && child.exitCode !== undefined || child.signalCode) return;
-    terminateDelegateChild(child, "SIGKILL");
-  }, KILL_GRACE_MS);
-  timer.unref?.();
-  shutdownKillTimers.set(run.runId, timer);
+function waitForDelegateExit(child: ChildProcess, timeoutMs: number): Promise<void> {
+  if (delegateHasExited(child)) return Promise.resolve();
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      child.off("close", finish);
+      child.off("error", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    child.once("close", finish);
+    child.once("error", finish);
+    // Avoid a race with a close event between the initial check and listeners.
+    if (delegateHasExited(child)) finish();
+  });
 }
 
 /** Stop all delegate work before Pi disposes its runtime. Idempotent because
- * session_shutdown can be emitted more than once during signal/quit cleanup. */
-export function shutdownDelegates(): void {
+ * session_shutdown can be emitted more than once during signal/quit cleanup.
+ * Await the grace period: an unref'd timer cannot escalate after Pi calls
+ * process.exit(), which was the source of leaked detached delegates. */
+export async function shutdownDelegates(): Promise<void> {
   if (delegatesShuttingDown) return;
   delegatesShuttingDown = true;
 
@@ -285,6 +458,7 @@ export function shutdownDelegates(): void {
   notifyPi = undefined;
   notifyWindowStart = 0;
 
+  const running: DelegateRun[] = [];
   for (const run of runs.values()) {
     if (run.status === "queued") {
       run.status = "cancelled";
@@ -296,13 +470,32 @@ export function shutdownDelegates(): void {
     if (run.status !== "running") continue;
     run.status = "cancelled";
     run.consumed = true;
-    const child = run.child;
-    if (!child) continue;
-    terminateDelegateChild(child, "SIGTERM");
-    scheduleShutdownKill(run);
+    if (!run.child) continue;
+    running.push(run);
+    terminateDelegateChild(run.child, "SIGTERM");
   }
+  // Also cover runs whose direct child already exited but whose detached
+  // descendants kept the process group alive after finalization.
+  await signalOwnedDelegateGroups("SIGTERM");
+
+  await Promise.all(running.map((run) => waitForDelegateExit(run.child!, KILL_GRACE_MS)));
+  for (const run of running) {
+    const child = run.child;
+    if (child && !delegateHasExited(child)) terminateDelegateChild(child, "SIGKILL");
+  }
+  await signalOwnedDelegateGroups("SIGKILL");
   delegateStatusWidget.poke();
 }
+
+// Covers crash paths that bypass Pi's async session_shutdown disposal. The
+// `exit` event is synchronous, so use SIGKILL rather than scheduling work.
+process.once("exit", () => {
+  for (const run of runs.values()) {
+    if (!run.child || delegateHasExited(run.child)) continue;
+    terminateDelegateChild(run.child, "SIGKILL");
+  }
+  signalOwnedDelegateGroupsSync("SIGKILL");
+});
 
 /** Cumulative delegate usage across the session (separate display mode). */
 let delegateUsageTotal: Usage | undefined;
@@ -1622,6 +1815,16 @@ async function runDelegate(
         task: args.task,
       });
       run.child = child;
+      // Durable owner record lets a later Pi process reap this detached
+      // process group if this host is killed before normal shutdown. Keep this
+      // synchronous: launch() must attach child listeners without an await gap.
+      if (typeof child.pid === "number" && child.pid > 0) {
+        try {
+          writeDelegateOwner(runId, child.pid, run.startedAt);
+        } catch (err) {
+          logWarn("delegate", { event: "owner-record-write-failed", runId, error: String(err) });
+        }
+      }
       let settled = false;
       // Watchdogs: idle (no output), EOF grace, hard limit. A stuck child holds
       // its stdout fd open so stdout EOF never fires — idle is the main defense.
@@ -1703,7 +1906,7 @@ async function runDelegate(
         void (async () => {
           if (settled) return;
           settled = true;
-          clearShutdownKillTimer(runId);
+          void removeDelegateOwner(runId);
           delegateGate.release();
           watchdog.dispose();
           void cleanupTmp(tmpDir);
@@ -1904,7 +2107,7 @@ async function runDelegate(
       child.on("error", (err) => {
         if (settled) return;
         settled = true;
-        clearShutdownKillTimer(runId);
+        void removeDelegateOwner(runId);
         delegateGate.release();
         watchdog.dispose();
         void cleanupTmp(tmpDir);
