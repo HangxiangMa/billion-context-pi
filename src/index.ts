@@ -16,7 +16,7 @@ import { makeCompressTool, isCompressSuccessText, isCompressNoopText } from "./c
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
-import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, fleetRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage, setDelegatePolicy, setDelegateDefaults, setDelegateNotifyIfRead, markDelegateResultRead, markDelegateRunReadByCommand, shutdownDelegates } from "./delegate-tool.js";
+import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, fleetRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage, setDelegatePolicy, setDelegateDefaults, setDelegateNotifyIfRead, markDelegateResultRead, markDelegateRunReadByCommand, shutdownDelegates, reapOrphanedDelegates } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages, extractText } from "./messages.js";
 import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
@@ -174,6 +174,10 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       return;
     }
     if (standDownIfProxied(ctx)) return;
+    // Recover detached delegates left by a crashed/force-killed Pi before
+    // registering this session's tools. The sidecars are owner-PID guarded so
+    // concurrent live Pi sessions are not touched.
+    await reapOrphanedDelegates();
     runtime.store.invalidate();
     runtime.clearNudgeTracking();
     runtime.throttleFor(ctx.sessionManager.getSessionId()).reset();
@@ -232,11 +236,11 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     // pi.events for a host dock (see fleet-widget.ts's emitBridge).
     delegateStatusWidget.setContext(ctx, runningRunsSnapshot, pi, fleetRunsSnapshot);
   });
-  pi.on("session_shutdown", (event, ctx) => {
+  pi.on("session_shutdown", async (event, ctx) => {
     // Delegates are detached so they can outlive a tool call, but they must
     // not outlive the Pi host itself. Keep them across in-process session
     // replacement (/new, /resume, /fork, /reload); stop them on final quit.
-    if (event?.reason === "quit") shutdownDelegates();
+    if (event?.reason === "quit") await shutdownDelegates();
     runtime.clearDeadCompress(ctx.sessionManager.getSessionId());
     runtime.dropTokenScale(ctx.sessionManager.getSessionId());
     delegateStatusWidget.dispose();
