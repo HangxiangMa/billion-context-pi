@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { FleetRunView } from "./delegate-tool.js";
+import { getDelegateUsage } from "./delegate-tool.js";
 import { initFooterStatus, updateFooterStatus, disposeFooterStatus } from "./footer-status.js";
 
 const DELEGATE_WIDGET_KEY = "billion-context-pi-delegates";
@@ -47,7 +48,17 @@ function emitBridge(): void {
       cost: r.usage?.cost.total,
       tokens: r.usage ? { input: r.usage.input, output: r.usage.output } : undefined,
     }));
-    pi.events.emit(BRIDGE_CHANNEL, { runs });
+    const usage = getDelegateUsage();
+    pi.events.emit(BRIDGE_CHANNEL, {
+      runs,
+      usage: usage
+        ? {
+            input: usage.input,
+            output: usage.output,
+            cost: usage.cost.total,
+          }
+        : undefined,
+    });
   } catch {
     // best-effort UI hint — never let it break delegation
   }

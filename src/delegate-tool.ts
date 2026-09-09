@@ -243,10 +243,15 @@ export function terminateDelegateChild(child: Pick<ChildProcess, "kill" | "pid">
  *  resolved maxDepth rides along so the cap binds the whole delegation tree
  *  even when the child loads a different project acp.json. */
 export function delegateChildEnv(parentDepth: number, maxDepth: number): NodeJS.ProcessEnv {
+  const subagentDepth = Number.parseInt(process.env.PI_SUBAGENT_DEPTH ?? "0", 10) || 0;
   return {
     ...process.env,
     PI_ACP_DELEGATE_DEPTH: String(parentDepth + 1),
     PI_ACP_DELEGATE_MAX_DEPTH: String(maxDepth),
+    // If pi-subagents is installed in the child, mark this ACP child as
+    // nested. This prevents it from starting a second delegation tree via
+    // subagent_spawn and avoids ACP/subagent recursion and duplicate work.
+    PI_SUBAGENT_DEPTH: String(subagentDepth + 1),
   };
 }
 
@@ -1259,25 +1264,7 @@ export function flushDelegateNotifications(): void {
   }
   parts.push(buildBatchTrailer(deliverable, failedCount > 0, mode));
   const text = parts.join("\n\n");
-  const send = pi.sendUserMessage;
-  let sent = false;
-  if (typeof send === "function") {
-    try {
-      send.call(pi, text, { deliverAs: "followUp" });
-      sent = true;
-    } catch (err) {
-      logError("delegate", {
-        event: "notify-batch-error",
-        error: String(err),
-        runIds: deliverable.map((r) => r.runId).join(","),
-      });
-    }
-  } else {
-    logWarn("delegate", {
-      event: "notify-batch-skipped",
-      reason: "sendUserMessage unavailable",
-    });
-  }
+  const sent = sendDelegateFollowUp(pi, text, deliverable.map((r) => r.runId).join(","));
   for (const r of deliverable) {
     if (sent) r.injected = true;
     if (r.usage && !r.usageReported && (mode === "separate" || sent)) r.usageReported = true;
@@ -1596,6 +1583,79 @@ export function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof W
   };
 }
 
+/** Cancel a live or queued run. Returns false when run is unknown or already terminal. */
+export function cancelDelegateRun(runId: string): boolean {
+  const run = runs.get(runId);
+  if (!run || (run.status !== "running" && run.status !== "queued")) return false;
+  const wasQueued = run.status === "queued";
+  run.status = "cancelled";
+  run.consumed = true; // suppress injection; the waiter (if any) gets cancelled status
+  if (wasQueued) {
+    // No child exists yet, so nothing will fire finalize to free the gate slot or
+    // wake a parked waiter — do both explicitly here.
+    delegateGate.cancelQueued(runId);
+    run.waiter?.();
+  } else {
+    try {
+      if (run.child) terminateDelegateChild(run.child, "SIGTERM");
+    } catch (err) {
+      debug.event("delegate-cancel-kill-error", {
+        runId,
+        error: String(err),
+      });
+      logError("delegate", {
+        event: "cancel-kill-error",
+        runId,
+        error: String(err),
+      });
+    }
+  }
+  delegateStatusWidget.poke();
+  return true;
+}
+
+/** Cancel a run, then start a resumed run with extra direction. This is the
+ * inspector's "interrupt + guide" action: a one-shot child cannot accept a
+ * second stdin prompt, so guidance is applied to the next restored turn. */
+export async function guideDelegate(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  runId: string,
+  guidance: string,
+): Promise<string> {
+  const run = runs.get(runId);
+  if (!run) return `Unknown runId "${runId}".`;
+  const text = guidance.trim();
+  if (!text) return "Guidance must be non-empty.";
+  if (run.status === "running" || run.status === "queued") {
+    cancelDelegateRun(runId);
+    // Wait for finalize to finish writing the session/result before copying it
+    // into the resumed run. This also avoids two children sharing one session.
+    const deadline = Date.now() + 15_000;
+    while ((run.status as RunStatus) === "cancelled" && !run.result && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  const sessionFile = join(OUT_DIR, `${runId}${SESSION_EXT}`);
+  const canResume = existsSync(sessionFile);
+  const task = canResume
+    ? text
+    : `${run.task}\n\nAdditional guidance for this attempt:\n${text}`;
+  return runDelegate(
+    pi,
+    {
+      agent: run.agent,
+      task,
+      resumeFrom: canResume ? runId : undefined,
+      cwd: run.cwd,
+      model: run.model,
+      async: true,
+    },
+    ctx,
+    undefined,
+  );
+}
+
 export function makeDelegateCancelTool(_pi: ExtensionAPI): ToolDefinition<typeof CancelParams> {
   const exec = async (params: Static<typeof CancelParams>): Promise<AgentToolResult<unknown>> => {
     const { runId } = params;
@@ -1609,29 +1669,7 @@ export function makeDelegateCancelTool(_pi: ExtensionAPI): ToolDefinition<typeof
     if (run.status !== "running" && run.status !== "queued") {
       return buildCancelResult(run, `Run ${runId} already ${run.status} (no action).`);
     }
-    const wasQueued = run.status === "queued";
-    run.status = "cancelled";
-    run.consumed = true; // suppress injection; the waiter (if any) gets cancelled status
-    if (wasQueued) {
-      // No child exists yet, so nothing will fire finalize to free the gate slot or
-      // wake a parked waiter — do both explicitly here.
-      delegateGate.cancelQueued(runId);
-      run.waiter?.();
-    } else {
-      try {
-        if (run.child) terminateDelegateChild(run.child, "SIGTERM");
-      } catch (err) {
-        debug.event("delegate-cancel-kill-error", {
-          runId,
-          error: String(err),
-        });
-        logError("delegate", {
-          event: "cancel-kill-error",
-          runId,
-          error: String(err),
-        });
-      }
-    }
+    cancelDelegateRun(runId);
     delegateStatusWidget.poke();
     const displayMode = delegateDisplayUsage;
     const file = join(OUT_DIR, `${runId}.out`);
@@ -2469,19 +2507,6 @@ export function injectResult(
   activityFile?: string,
   signal?: NodeJS.Signals | null,
 ): boolean {
-  const send = pi.sendUserMessage;
-  if (typeof send !== "function") {
-    debug.event("delegate-inject-skipped", {
-      runId,
-      reason: "sendUserMessage unavailable",
-    });
-    logWarn("delegate", {
-      event: "inject-skipped",
-      runId,
-      reason: "sendUserMessage unavailable",
-    });
-    return false;
-  }
   const failed = status === "failed";
   const statusLabel = failed ? "FAILED ⚠️" : "completed";
   // Tell the model how many other delegates are still running, so it doesn't
@@ -2533,32 +2558,22 @@ export function injectResult(
   }
 
   const closing = failed
-    ? "This delegate did NOT complete its task — its result is missing from your work. Read the error excerpt (and the result file if present), then decide whether to re-dispatch the task before wrapping up. This is an automated system notification, NOT a user message."
-    : "This is an automated system notification, NOT a user message. Read the result file if you need the details, then continue your original task; do not treat this as a new user request.";
+    ? "Action required: this delegate did NOT complete its task. Read the error excerpt/result, then decide whether to re-dispatch before wrapping up. This is an automated system notification, NOT a user message."
+    : "Action required: read the result if needed and continue your original task now. This is an automated system notification, NOT a user message; do not stop at this notification.";
   const header = `[acp_delegate ${statusLabel}] **${agent}** (runId \`${runId}\`, ${exitLabel(code, signal)})${timeoutNote}${remainingLine}${usageNote} ${closing}`;
   const { text: recoveryText, covered } = buildRecoveryNotice(Array.from(runs.values()), runId);
   const text =
     formatPayload(header, file, task, failed ? body : undefined, failed ? activityFile : undefined) +
     (recoveryText ? `\n\n${recoveryText}` : "");
-  try {
-    // sendUserMessage is fire-and-forget (returns void): it enqueues a
-    // follow-up turn. Interactive/rpc sessions consume it via their main loop;
-    // injection at shutdown is best-effort (no API to await a turn).
-    send.call(pi, text, { deliverAs: "followUp" });
-    // Commit the recovery marking only now: a thrown send above must leave the
-    // covered runs undelivered so a later carrier can still recover them.
+  // Commit recovery marking only after the sender accepts the message. The
+  // helper also has an explicit triggerTurn fallback for older embedded hosts.
+  if (sendDelegateFollowUp(pi, text, runId)) {
     for (const r of covered) r.injected = true;
     return true;
-  } catch (err) {
-    debug.event("delegate-inject-error", { runId, error: String(err) });
-    logError("delegate", {
-      event: "inject-error",
-      runId,
-      agent,
-      error: String(err),
-    });
-    return false;
   }
+  debug.event("delegate-inject-error", { runId });
+  logError("delegate", { event: "inject-error", runId, agent });
+  return false;
 }
 
 /** Deliver a terminal failure that occurred OUTSIDE normal finalize (spawn
@@ -2580,6 +2595,40 @@ function notifyTerminalFailure(pi: ExtensionAPI, run: DelegateRun): void {
 // and the result file path. NO preview: the model uses `read` for details,
 // and that read (not this message) is the large content. Keeping this minimal
 // means it stays cheap to retain in context (or to compress away).
+function sendDelegateFollowUp(pi: ExtensionAPI, text: string, runIds: string): boolean {
+  const sendUser = pi.sendUserMessage;
+  if (typeof sendUser === "function") {
+    try {
+      // sendUserMessage always starts a turn when idle. Keep followUp delivery
+      // so completion arriving during a parent turn is queued safely after its
+      // tool results; do not rely on the host to infer triggerTurn.
+      const pending = sendUser.call(pi, text, { deliverAs: "followUp" }) as unknown;
+      if (pending && typeof (pending as Promise<unknown>).catch === "function") {
+        void (pending as Promise<unknown>).catch((err) => {
+          logError("delegate", { event: "notify-error", error: String(err), runIds });
+        });
+      }
+      return true;
+    } catch (err) {
+      logError("delegate", { event: "notify-batch-error", error: String(err), runIds });
+      return false;
+    }
+  }
+  // Older embedded hosts may expose sendMessage but not sendUserMessage. A
+  // custom message with triggerTurn=true preserves the same wake-up contract.
+  const send = pi.sendMessage;
+  if (typeof send === "function") {
+    try {
+      send.call(pi, { customType: "acp-delegate-result", content: text, display: false }, { triggerTurn: true, deliverAs: "followUp" });
+      return true;
+    } catch (err) {
+      logError("delegate", { event: "notify-fallback-error", error: String(err), runIds });
+    }
+  }
+  logWarn("delegate", { event: "notify-skipped", reason: "no message sender available", runIds });
+  return false;
+}
+
 function formatPayload(header: string, file: string, task: string, body?: string, activityFile?: string): string {
   const lines: string[] = [header, "", `Task: ${truncate(task, 160)}`];
   if (file) {
