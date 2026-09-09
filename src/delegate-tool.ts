@@ -435,6 +435,8 @@ export interface FleetRunView {
   replyFile: string;
   /** Live tool-activity log (async json-stream runs only). */
   activityFile?: string;
+  /** Complete live Pi session transcript; append-only while child runs. */
+  transcriptFile?: string;
   sessionFile?: string;
   usage?: Usage;
   model?: string;
@@ -469,6 +471,7 @@ function toFleetRunView(r: DelegateRun): FleetRunView {
     resumedFrom: r.resumedFrom,
     replyFile: r.result?.file ?? join(OUT_DIR, `${r.runId}.out`),
     activityFile: r.activityFile,
+    transcriptFile: join(OUT_DIR, `${r.runId}${SESSION_EXT}`),
     sessionFile: join(OUT_DIR, `${r.runId}${SESSION_EXT}`),
     usage: r.usage,
     model: r.model,
