@@ -19,6 +19,7 @@ import { makeStatusTool } from "./status-tool.js";
 import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage, setDelegatePolicy, setDelegateDefaults, setDelegateNotifyIfRead, markDelegateResultRead, markDelegateRunReadByCommand } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages, extractText } from "./messages.js";
+import { dropCompressReasoning } from "./reasoning-drop.js";
 import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import { openFleetInspector } from "./fleet-inspector.js";
@@ -395,7 +396,20 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     });
 
     const originalById = collectOriginals(entries);
-    const rebuilt = coreOutToAgentMessages(turn.messages, originalById);
+    let rebuilt = coreOutToAgentMessages(turn.messages, originalById);
+    // [#336] Request-time reasoning drop, aligned with opencode-acp #377:
+    // compress calls are hard-exempt from compression, so their thinking
+    // rides along every request as an unreclaimable floor. Applied BEFORE the
+    // nudge push so a synthetic user-role nudge can never become the "last
+    // genuine user message" boundary and extend the closed zone over the
+    // active round. Persisted history is never modified — this only rewrites
+    // the outgoing view, rebuilt fresh from entries on every event.
+    const reasoningDrop = runtime.reasoningDropFor(ctx);
+    const droppedThinking = dropCompressReasoning(rebuilt, reasoningDrop);
+    if (droppedThinking !== rebuilt) {
+      debug.event("reasoning-drop", { sid, dropped: droppedThinking.length, drop: reasoningDrop.drop, threshold: reasoningDrop.threshold });
+    }
+    rebuilt = droppedThinking;
     const debugOn = debug.enabled;
 
     const turnKey = lastUserMessageId(entries) ?? sid;

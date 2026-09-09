@@ -48,7 +48,8 @@ Create `~/.pi/acp.json` (or `<project>/.pi/acp.json`) and drop in whichever keys
   "compress": {
     "maxContextLimit": "75%",
     "emergencyThresholdPercent": "95%",
-    "nudgeGrowthTokens": 50000
+    "nudgeGrowthTokens": 50000,
+    "reasoning": { "drop": true, "threshold": 2048 }
   }
 }
 ```
@@ -141,6 +142,7 @@ All keys below are currently **ACTIVE**.
 | `compress.maxContextLimit` | number \| string | `"75%"` | 🟢 ACTIVE | Context threshold that triggers forced compression nudges. |
 | `compress.emergencyThresholdPercent` | number \| string | `"95%"` | 🟢 ACTIVE | Context threshold that triggers emergency truncation. |
 | `compress.nudgeGrowthTokens` | number | `50000` | 🟢 ACTIVE | Token growth step for soft compression nudges. |
+| `compress.reasoning` | object | `{ "drop": true, "threshold": 2048 }` | 🟢 ACTIVE | Drop oversized thinking from historical `compress` calls (request-time; persisted history untouched). |
 
 **Prompts keys**
 
@@ -456,6 +458,26 @@ The flow is:
 - **Status:** 🟢 ACTIVE
 - **Description:** The token-growth threshold that controls the cadence of **soft** compression nudges. A soft nudge fires roughly every time this many tokens of new compressible content accumulate. A lower value means the model is nudged to compress more often; a higher value means less frequent nudges. This only governs *growth-driven* nudges — once usage crosses `compress.maxContextLimit`, forced nudges take over regardless of this setting. Maps to the kernel settings `nudge.growthFloor` and `nudge.growthCap`.
 - **Same-turn re-inject:** within one user turn a nudge injects at most once, but once the context has since grown by a full growth floor (mirroring the kernel's anti-thrashing cadence: `max(minGrowthFloor, minGrowthRatio × adaptiveGrowth)` — 22.5K tokens with defaults) a fresh reminder re-injects in the same turn (issue #269: a model that ignored a 78% nudge used to stay silent until the 95% emergency truncation). After a successful compress the growth baseline re-anchors to the new (smaller) scale, so post-compress regrowth into the pressure band is not held against the pre-compress peak.
+
+### `compress.reasoning`
+
+- **Type:** `object` — `{ "drop": boolean, "threshold": number }`
+- **Default:** `{ "drop": true, "threshold": 2048 }`
+- **Status:** 🟢 ACTIVE
+- **Description:** Config for dropping oversized reasoning (thinking) parts from historical `compress` tool calls — exact semantic alignment with [opencode-acp #377](https://github.com/ranxianglei/opencode-acp/pull/377). `compress` calls are hard-exempt from compression (their tool results anchor the block summaries), so their thinking rides along every request as an unreclaimable context floor. A request-time pass removes `thinking` parts from a message only when **all** gates hold:
+  1. **Closed turn** — the message is strictly before the last genuine user message; the active round is never touched (some providers require replaying the active round's thinking).
+  2. **Selector** — the message carries a `toolCall` part with name `compress` (only compress; other protected tools would need their own explicit config).
+  3. **Size** — the message's total reasoning length (chars, summed across parts of that message, never across messages) **strictly exceeds** `threshold`. `0` drops any non-empty reasoning.
+
+  Persisted history is never modified — the pass only rewrites the outgoing view, rebuilt fresh from the session log on every request. Pure, idempotent, fail-safe (any error leaves messages untouched). Merged field-wise (`drop`, `threshold` separately) across the three levels of `compress.providers`.
+
+  Fields:
+  - `drop` (`boolean`, default `true`) — master switch; `false` disables the pass (kill-switch).
+  - `threshold` (`number`, chars, default `2048`) — single-thinking size gate.
+
+  Providers whose thinking items are opaque and must round-trip unmodified (e.g. OpenAI encrypted reasoning) can opt out per-provider:\n  ```json
+  { "compress": { "providers": { "openai": { "reasoning": { "drop": false } } } } }
+  ```
 
 ### `compress.providers` — per-provider & per-model overrides
 

@@ -1,4 +1,5 @@
 import { defaultConfig, type Config, type Prompts } from "acp-kernel";
+import type { CompressReasoningConfig } from "./reasoning-drop.js";
 import type { ThrottleRetryConfig } from "./throttle-retry.js";
 import { logWarn } from "./log.js";
 
@@ -129,6 +130,10 @@ export interface CompressSettings {
    *  window and would suppress every nudge. Maps to kernel
    *  nudge.minPressureBenefitTokens. */
   minPressureBenefitTokens?: number;
+  /** [#336] Drop oversized reasoning (thinking) from historical `compress`
+   *  tool calls — see CompressReasoningConfig in src/reasoning-drop.ts.
+   *  Merged field-wise (drop, threshold) across the three levels. */
+  reasoning?: CompressReasoningConfig;
 }
 
 /** Per-provider compression overrides. Carries the same tuning fields as the
@@ -358,6 +363,10 @@ export function mergeCompress(
     emergencyThresholdPercent: model?.emergencyThresholdPercent ?? provider?.emergencyThresholdPercent ?? global?.emergencyThresholdPercent,
     nudgeGrowthTokens: model?.nudgeGrowthTokens ?? provider?.nudgeGrowthTokens ?? global?.nudgeGrowthTokens,
     minPressureBenefitTokens: model?.minPressureBenefitTokens ?? provider?.minPressureBenefitTokens ?? global?.minPressureBenefitTokens,
+    reasoning: {
+      drop: model?.reasoning?.drop ?? provider?.reasoning?.drop ?? global?.reasoning?.drop,
+      threshold: model?.reasoning?.threshold ?? provider?.reasoning?.threshold ?? global?.reasoning?.threshold,
+    },
   };
 }
 

@@ -48,7 +48,8 @@
   "compress": {
     "maxContextLimit": "75%",
     "emergencyThresholdPercent": "95%",
-    "nudgeGrowthTokens": 50000
+    "nudgeGrowthTokens": 50000,
+    "reasoning": { "drop": true, "threshold": 2048 }
   }
 }
 ```
@@ -140,6 +141,7 @@
 | `compress.maxContextLimit` | number \| string | `"75%"` | 🟢 ACTIVE | 触发强制压缩 nudge 的上下文阈值。 |
 | `compress.emergencyThresholdPercent` | number \| string | `"95%"` | 🟢 ACTIVE | 触发紧急截断的上下文阈值。 |
 | `compress.nudgeGrowthTokens` | number | `50000` | 🟢 ACTIVE | 软压缩 nudge 的 token 增长步长。 |
+| `compress.reasoning` | object | `{ "drop": true, "threshold": 2048 }` | 🟢 ACTIVE | 请求时丢弃历史 `compress` 调用上的超大思考（不修改持久化历史）。 |
 
 **prompts 键**
 
@@ -448,6 +450,27 @@
 - **状态：** 🟢 ACTIVE
 - **说明：** 控制**软**压缩 nudge 频率的 token 增长阈值。每当积累约这么多新可压缩内容时，触发一次软 nudge。值越低模型被 nudge 压缩的频率越高；值越高频率越低。此设置只控制*基于增长的* nudge——用量越过 `compress.maxContextLimit` 后，强制 nudge 接管，不受此设置影响。映射到内核设置 `nudge.growthFloor` 和 `nudge.growthCap`。
 - **同轮重注入：** 同一用户轮内 nudge 至多注入一次，但上下文自上次注入后又增长满一个增长门槛（镜像内核防抖 cadence：`max(minGrowthFloor, minGrowthRatio × adaptiveGrowth)`，默认 22.5K token）时，会在同轮重新注入新提醒（issue #269：模型忽略 78% nudge 后，原来会一直沉默到 95% emergency 机械截断）。成功 compress 后增长基线重锚到新（更小）刻度，压缩后重新长回压力带不会被压缩前峰值压制。
+
+### `compress.reasoning`
+
+- **类型：** `object` —— `{ "drop": boolean, "threshold": number }`
+- **默认值：** `{ "drop": true, "threshold": 2048 }`
+- **状态：** 🟢 ACTIVE
+- **说明：** 控制从历史 `compress` 工具调用中丢弃超大 reasoning（思考）部分，与 [opencode-acp #377](https://github.com/ranxianglei/opencode-acp/pull/377) 完全对齐。`compress` 调用被硬排除在压缩之外（其工具结果是块摘要的锚点），其思考会随每次请求原样重发，形成无法回收的上下文底座。一个请求时 pass 只在**全部**门控满足时移除 `thinking` 部分：
+  1. **已闭合轮次** —— 消息严格位于最后一条真实用户消息之前；活跃轮永不触碰（部分 provider 要求回放活跃轮思考）。
+  2. **选择器** —— 消息携带 `toolCall` 部分且 name 为 `compress`（仅 compress；其他保护工具如需支持应单独显式配置）。
+  3. **大小** —— 该消息 reasoning 总长（字符数，仅对该消息各部分求和，不跨消息累计）**严格大于** `threshold` 才丢弃；`0` 表示丢弃任何非空 reasoning。
+
+  持久化历史从不被修改——pass 只改写出口视图，每次请求从会话日志全新重建。纯函数、幂等、fail-safe（任何错误原样返回）。在 `compress.providers` 三级间逐字段合并（`drop`、`threshold` 各自独立）。
+
+  字段：
+  - `drop`（`boolean`，默认 `true`）—— 总开关；`false` 完全禁用（kill-switch）。
+  - `threshold`（`number`，字符数，默认 `2048`）—— 单条思考大小门。
+
+  思考项不透明且必须原样回传的 provider（如 OpenAI 加密 reasoning）可按 provider 退出：
+  ```json
+  { "compress": { "providers": { "openai": { "reasoning": { "drop": false } } } } }
+  ```
 
 ### `compress.providers` —— 按 provider / 按 model 覆盖
 
