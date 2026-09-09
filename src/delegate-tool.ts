@@ -43,7 +43,31 @@ export function delegateSpawnOptions(cwd: string, env: NodeJS.ProcessEnv): Spawn
     env,
     stdio: ["pipe", "pipe", "pipe"],
     shell: false,
+    // Give every delegate tree its own process group. This lets session
+    // shutdown terminate Pi plus any tools it spawned without ever signalling
+    // the interactive parent (which shares the parent's process group).
+    detached: process.platform !== "win32",
   };
+}
+
+/** Send signal to a delegate and its descendants without touching the host.
+ * POSIX delegates are detached process groups; Windows falls back to Node's
+ * direct-child kill because negative-PID process-group signalling is not
+ * portable there. */
+export function terminateDelegateChild(child: Pick<ChildProcess, "kill" | "pid">, signal: NodeJS.Signals): boolean {
+  if (process.platform !== "win32" && typeof child.pid === "number" && child.pid > 0) {
+    try {
+      return process.kill(-child.pid, signal);
+    } catch {
+      // The group may already have exited; try the direct child as a safe
+      // fallback for test doubles and platforms with unusual process groups.
+    }
+  }
+  try {
+    return child.kill(signal);
+  } catch {
+    return false;
+  }
 }
 
 /** Child process env for a nested delegate: depth increments by one, and the
@@ -221,6 +245,64 @@ interface DelegateRun {
   readSuppressed?: boolean;
 }
 const runs = new Map<string, DelegateRun>();
+let delegatesShuttingDown = false;
+const shutdownKillTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function clearShutdownKillTimer(runId: string): void {
+  const timer = shutdownKillTimers.get(runId);
+  if (!timer) return;
+  clearTimeout(timer);
+  shutdownKillTimers.delete(runId);
+}
+
+function scheduleShutdownKill(run: DelegateRun): void {
+  clearShutdownKillTimer(run.runId);
+  const timer = setTimeout(() => {
+    shutdownKillTimers.delete(run.runId);
+    const child = run.child;
+    // A cancelled run is intentionally excluded from the normal watchdog's
+    // escalation path. Keep shutdown escalation independent of run.status.
+    if (!child || child.exitCode !== null && child.exitCode !== undefined || child.signalCode) return;
+    terminateDelegateChild(child, "SIGKILL");
+  }, KILL_GRACE_MS);
+  timer.unref?.();
+  shutdownKillTimers.set(run.runId, timer);
+}
+
+/** Stop all delegate work before Pi disposes its runtime. Idempotent because
+ * session_shutdown can be emitted more than once during signal/quit cleanup. */
+export function shutdownDelegates(): void {
+  if (delegatesShuttingDown) return;
+  delegatesShuttingDown = true;
+
+  if (notifyTimer) {
+    clearTimeout(notifyTimer);
+    notifyTimer = undefined;
+  }
+  notifyQueue.splice(0).forEach((run) => {
+    run.notifyQueued = false;
+  });
+  notifyPi = undefined;
+  notifyWindowStart = 0;
+
+  for (const run of runs.values()) {
+    if (run.status === "queued") {
+      run.status = "cancelled";
+      run.consumed = true;
+      delegateGate.cancelQueued(run.runId);
+      run.waiter?.();
+      continue;
+    }
+    if (run.status !== "running") continue;
+    run.status = "cancelled";
+    run.consumed = true;
+    const child = run.child;
+    if (!child) continue;
+    terminateDelegateChild(child, "SIGTERM");
+    scheduleShutdownKill(run);
+  }
+  delegateStatusWidget.poke();
+}
 
 /** Cumulative delegate usage across the session (separate display mode). */
 let delegateUsageTotal: Usage | undefined;
@@ -1344,7 +1426,7 @@ export function makeDelegateCancelTool(_pi: ExtensionAPI): ToolDefinition<typeof
       run.waiter?.();
     } else {
       try {
-        run.child?.kill("SIGTERM");
+        if (run.child) terminateDelegateChild(run.child, "SIGTERM");
       } catch (err) {
         debug.event("delegate-cancel-kill-error", {
           runId,
@@ -1414,6 +1496,9 @@ async function runDelegate(
   const agent = AGENTS[args.agent];
   if (!agent) {
     return `Unknown agent "${args.agent}". Choose one of: ${AGENT_NAMES.join(", ")}.`;
+  }
+  if (delegatesShuttingDown) {
+    return "Delegate subsystem is shutting down; start a new Pi session before dispatching more work.";
   }
   const parentDepth = Number(process.env.PI_ACP_DELEGATE_DEPTH ?? "0");
   const maxDepth = delegatePolicy.maxDepth;
@@ -1618,6 +1703,7 @@ async function runDelegate(
         void (async () => {
           if (settled) return;
           settled = true;
+          clearShutdownKillTimer(runId);
           delegateGate.release();
           watchdog.dispose();
           void cleanupTmp(tmpDir);
@@ -1818,6 +1904,7 @@ async function runDelegate(
       child.on("error", (err) => {
         if (settled) return;
         settled = true;
+        clearShutdownKillTimer(runId);
         delegateGate.release();
         watchdog.dispose();
         void cleanupTmp(tmpDir);
@@ -2044,14 +2131,14 @@ function waitForChild(
     let timer: ReturnType<typeof setTimeout> | undefined;
     if (timeoutMs !== null) {
       timer = setTimeout(() => {
-        child.kill("SIGTERM");
+        terminateDelegateChild(child, "SIGTERM");
         finish({ code: null, stdout: "", stderr: stderrText, timedOut: true });
       }, timeoutMs);
     }
 
     const onAbort = () => {
       if (timer) clearTimeout(timer);
-      child.kill("SIGTERM");
+      terminateDelegateChild(child, "SIGTERM");
     };
     signal?.addEventListener("abort", onAbort, { once: true });
 
