@@ -43,6 +43,7 @@ function emitBridge(): void {
       model: r.model,
       summary: r.summary,
       activity: r.activity,
+      transcriptFile: r.transcriptFile ?? r.sessionFile,
       cost: r.usage?.cost.total,
       tokens: r.usage ? { input: r.usage.input, output: r.usage.output } : undefined,
     }));
