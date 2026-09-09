@@ -1017,7 +1017,10 @@ test("delegateChildEnv increments depth and propagates the maxDepth cap", () => 
   const env = delegateChildEnv(1, 3);
   assert.equal(env.PI_ACP_DELEGATE_DEPTH, "2", "child depth = parent + 1");
   assert.equal(env.PI_ACP_DELEGATE_MAX_DEPTH, "3", "cap follows the delegation tree");
+  const parentSubagentDepth = Number.parseInt(process.env.PI_SUBAGENT_DEPTH ?? "0", 10) || 0;
+  assert.equal(env.PI_SUBAGENT_DEPTH, String(parentSubagentDepth + 1), "ACP child cannot start a nested pi-subagents tree");
   for (const [key, value] of Object.entries(process.env)) {
+    if (key === "PI_SUBAGENT_DEPTH") continue;
     assert.equal(env[key], value, `parent env ${key} inherited`);
   }
 });

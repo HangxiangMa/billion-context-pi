@@ -16,7 +16,7 @@ import { makeCompressTool, isCompressSuccessText, isCompressNoopText } from "./c
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
-import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, fleetRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage, setDelegatePolicy, setDelegateDefaults, setDelegateNotifyIfRead, markDelegateResultRead, markDelegateRunReadByCommand, shutdownDelegates, reapOrphanedDelegates } from "./delegate-tool.js";
+import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, cancelDelegateRun, guideDelegate, runningRunsSnapshot, fleetRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage, setDelegatePolicy, setDelegateDefaults, setDelegateNotifyIfRead, markDelegateResultRead, markDelegateRunReadByCommand, shutdownDelegates, reapOrphanedDelegates } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages, extractText } from "./messages.js";
 import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
@@ -216,8 +216,26 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       // embedded hosts) — shortcuts are a TUI nicety, never load-bearing.
       if (typeof pi.registerShortcut === "function") {
         pi.registerShortcut("ctrl+alt+f", {
-          description: "Inspect acp_delegate runs (live list + transcript)",
-          handler: (ctx) => { void openFleetInspector(ctx); },
+          description: "Inspect acp_delegate runs (live list + transcript; c cancel, p guide)",
+          handler: (inspectorCtx) => {
+            void openFleetInspector(inspectorCtx, {
+              cancel: (runId) => {
+                const cancelled = cancelDelegateRun(runId);
+                inspectorCtx.ui.notify(cancelled ? `[ACP] cancelled ${runId}` : `[ACP] ${runId} is no longer running`);
+              },
+              guide: (runId) => {
+                void (async () => {
+                  const guidance = await inspectorCtx.ui.editor(`Guide delegate ${runId} (interrupt + resume)`, "");
+                  if (!guidance?.trim()) return;
+                  inspectorCtx.ui.notify(`[ACP] interrupting ${runId}; starting resumed delegate with guidance…`);
+                  const result = await guideDelegate(pi, inspectorCtx, runId, guidance);
+                  inspectorCtx.ui.notify(`[ACP] ${result}`);
+                })().catch((err) => {
+                  inspectorCtx.ui.notify(`[ACP] guide failed: ${err instanceof Error ? err.message : String(err)}`);
+                });
+              },
+            });
+          },
         });
       }
     }
