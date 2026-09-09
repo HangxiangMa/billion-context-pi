@@ -273,6 +273,26 @@ function tier3OnlyRewrite(newBlocks: CompressionBlock[], allBlocks: CompressionB
   return spans;
 }
 
+// #344: the rewrite guard stops the loop but its recovery hint only covers
+// message-type ranges. When the session's actionable mass is tier blocks, name
+// them so repetition-prone models get a concrete next action instead of
+// hunting (and re-hitting the guard).
+function tierReadyHint(state: CompressionState, config: ReturnType<AcpRuntime["configFor"]>): string {
+  if (!config.tiers.enabled) return "";
+  const active = state.blocks.filter((b) => b.active);
+  const first = (bs: CompressionBlock[]) => bs[0]?.blockId ?? "";
+  const last = (bs: CompressionBlock[]) => bs[bs.length - 1]?.blockId ?? "";
+  const t2 = active.filter((b) => b.tier === 2);
+  if (t2.length >= config.tiers.tier3Trigger) {
+    return `Actionable now: condense tier-2 blocks ${first(t2)}..${last(t2)} into a single tier-3 block (compress({ content: [{ startId: "${first(t2)}", endId: "${last(t2)}", summary: "..." }] })).`;
+  }
+  const t1 = active.filter((b) => b.tier === 1);
+  if (t1.length >= config.tiers.tier2Trigger) {
+    return `Actionable now: distill tier-1 blocks ${first(t1)}..${last(t1)} into a single tier-2 block (compress({ content: [{ startId: "${first(t1)}", endId: "${last(t1)}", summary: "..." }] })).`;
+  }
+  return "";
+}
+
 async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId?: string): Promise<string> {
   const maybeRanges = normalizeRanges(args);
   // Argument errors throw (not return): pi-agent-core only sets isError:true
@@ -362,8 +382,10 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
       event: "tier3-rewrite-rejected",
       spans: rewriteSpans,
     });
+    const hint = tierReadyHint(state, config);
     throw new Error(
       `Range ${rewriteSpans.join(", ")} only re-condenses terminal tier-3 block(s) — T3 is the highest tier, so rewriting it reclaims nothing and can repeat forever (dog/billion-context-pi#3). Nothing was compressed. ` +
+        (hint ? `${hint} ` : "") +
         `Use search_context or decompress to retrieve details, or pick a range containing uncompressed messages (acp_status lists compressible ranges).`,
     );
   }
