@@ -40,6 +40,10 @@ function emitBridge(): void {
       status: r.status,
       startedAt: r.startedAt,
       finishedAt: r.finishedAt,
+      model: r.model,
+      summary: r.summary,
+      activity: r.activity,
+      cost: r.usage?.cost.total,
       tokens: r.usage ? { input: r.usage.input, output: r.usage.output } : undefined,
     }));
     pi.events.emit(BRIDGE_CHANNEL, { runs });
@@ -57,9 +61,7 @@ function truncateTask(task: string): string {
 function renderLines(runs: WidgetRun[]): string[] | undefined {
   if (runs.length === 0) return undefined;
   const now = Date.now();
-  const header = runs.length === 1
-    ? `acp_delegate · 1 running`
-    : `acp_delegate · ${runs.length} running`;
+  const header = runs.length === 1 ? `acp_delegate · 1 running` : `acp_delegate · ${runs.length} running`;
   const rows = runs.map((r) => {
     const elapsed = Math.max(0, Math.round((now - r.startedAt) / 1000));
     return `  ● ${r.agent} (${elapsed}s) — ${truncateTask(r.task)}`;

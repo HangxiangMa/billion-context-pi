@@ -1,20 +1,11 @@
-import {
-  spawn,
-  type ChildProcess,
-  type SpawnOptions,
-} from "node:child_process";
+import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { createWriteStream, existsSync, type WriteStream } from "node:fs";
 import { mkdir, mkdtemp, writeFile, rm, appendFile, readFile, copyFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve as resolvePath } from "node:path";
 import { Type, type Static } from "typebox";
 import { delegateStatusWidget } from "./fleet-widget.js";
-import type {
-  AgentToolResult,
-  ExtensionAPI,
-  ExtensionContext,
-  ToolDefinition,
-} from "@earendil-works/pi-coding-agent";
+import type { AgentToolResult, ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { debug, logError, logInfo, logWarn } from "./log.js";
 import { DEFAULT_DELEGATE_POLICY, type DelegatePolicy, type DelegateRoleConfig } from "./config.js";
 import { attachWatchdogs } from "./delegate-watchdog.js";
@@ -97,11 +88,7 @@ function piCliGlobalCandidates(env: NodeJS.ProcessEnv): string[] {
  *  argv[1] is only the pi CLI under a CLI host; embedded hosts (e.g. pi-web)
  *  run the SDK inside another node process, so probe instead. Non-pi hosts
  *  (omp) keep argv[1] untouched. */
-export function resolvePiCliEntry(
-  argv1: string,
-  env: NodeJS.ProcessEnv = process.env,
-  piHost = true,
-): string {
+export function resolvePiCliEntry(argv1: string, env: NodeJS.ProcessEnv = process.env, piHost = true): string {
   const explicit = env.PI_CLI_PATH;
   if (explicit) return explicit;
   if (argv1 && PI_CLI_ENTRY_RE.test(argv1)) return argv1;
@@ -111,7 +98,11 @@ export function resolvePiCliEntry(
     for (const candidate of piCliGlobalCandidates(env)) {
       if (existsSync(candidate)) return candidate;
     }
-    logWarn("delegate", { event: "cli-entry-unresolved", argv1, fallback: "argv[1]" });
+    logWarn("delegate", {
+      event: "cli-entry-unresolved",
+      argv1,
+      fallback: "argv[1]",
+    });
   }
   return argv1;
 }
@@ -204,6 +195,12 @@ interface DelegateRun {
    *  5m", "30m limit"); surfaced in completion headers as "(timed out: ...)". */
   timedOut?: string;
   waiter?: () => void;
+  /** Resolved provider/model reference used by child. */
+  model?: string;
+  /** Retained compact final reply for fleet/task-dock display. */
+  summary?: string;
+  /** Latest compact tool/activity line while child is running. */
+  activity?: string;
   /** Accumulated LLM usage from the delegate (from message_end events). */
   usage?: Usage;
   /** True once a wait/cancel tool has returned usage — prevents double-count. */
@@ -229,9 +226,7 @@ const runs = new Map<string, DelegateRun>();
 let delegateUsageTotal: Usage | undefined;
 
 export function addDelegateUsage(u: Usage): void {
-  delegateUsageTotal = delegateUsageTotal
-    ? accumulateUsage(delegateUsageTotal, u)
-    : u;
+  delegateUsageTotal = delegateUsageTotal ? accumulateUsage(delegateUsageTotal, u) : u;
 }
 
 export function getDelegateUsage(): Usage | undefined {
@@ -320,9 +315,14 @@ const delegateGate = new ConcurrencyGate(() => delegatePolicy.maxConcurrent);
 // from adapter.delegate. buildChildArgs reads them at spawn time. Kept as module
 // state (mirroring delegateDisplayUsage) so buildChildArgs stays testable without
 // threading config through every call site.
-let delegateDefaults: { thinkingLevel?: string; agents?: Record<string, DelegateRoleConfig> } = {};
+let delegateDefaults: {
+  thinkingLevel?: string;
+  agents?: Record<string, DelegateRoleConfig>;
+} = {};
 
-export function setDelegateDefaults(d: { thinkingLevel?: string; agents?: Record<string, DelegateRoleConfig> } | undefined): void {
+export function setDelegateDefaults(
+  d: { thinkingLevel?: string; agents?: Record<string, DelegateRoleConfig> } | undefined,
+): void {
   delegateDefaults = d ?? {};
 }
 
@@ -393,12 +393,27 @@ export function markDelegateRunReadByCommand(command: string): boolean {
   return matched;
 }
 
-
 /** Snapshot of currently-running delegate runs, for the TUI status widget. */
-export function runningRunsSnapshot(): { runId: string; agent: string; task: string; startedAt: number }[] {
-  const out: { runId: string; agent: string; task: string; startedAt: number }[] = [];
+export function runningRunsSnapshot(): {
+  runId: string;
+  agent: string;
+  task: string;
+  startedAt: number;
+}[] {
+  const out: {
+    runId: string;
+    agent: string;
+    task: string;
+    startedAt: number;
+  }[] = [];
   for (const r of runs.values()) {
-    if (r.status === "running") out.push({ runId: r.runId, agent: r.agent, task: r.task, startedAt: r.startedAt });
+    if (r.status === "running")
+      out.push({
+        runId: r.runId,
+        agent: r.agent,
+        task: r.task,
+        startedAt: r.startedAt,
+      });
   }
   return out;
 }
@@ -422,6 +437,9 @@ export interface FleetRunView {
   activityFile?: string;
   sessionFile?: string;
   usage?: Usage;
+  model?: string;
+  summary?: string;
+  activity?: string;
 }
 
 const MAX_FLEET_FINISHED = 12;
@@ -429,9 +447,7 @@ const MAX_FLEET_FINISHED = 12;
 /** Running first (oldest spawn on top), then recently finished (newest first,
  *  capped) — the order the fleet inspector list shows. */
 export function orderRunsForFleet(all: DelegateRun[]): DelegateRun[] {
-  const running = all
-    .filter((r) => r.status === "running")
-    .sort((a, b) => a.startedAt - b.startedAt);
+  const running = all.filter((r) => r.status === "running").sort((a, b) => a.startedAt - b.startedAt);
   const finished = all
     .filter((r) => r.status !== "running")
     .sort((a, b) => (b.finishedAt ?? 0) - (a.finishedAt ?? 0))
@@ -455,6 +471,9 @@ function toFleetRunView(r: DelegateRun): FleetRunView {
     activityFile: r.activityFile,
     sessionFile: join(OUT_DIR, `${r.runId}${SESSION_EXT}`),
     usage: r.usage,
+    model: r.model,
+    summary: r.summary,
+    activity: r.activity,
   };
 }
 
@@ -489,7 +508,12 @@ export interface EventApplier {
  *  msgWritten) so a final answer that arrives without preceding deltas is
  *  never lost from the file. */
 export function makeEventApplier(
-  opts: { showThinking: boolean; onUsage?: (usage: Usage) => void; onSettled?: () => void },
+  opts: {
+    showThinking: boolean;
+    onUsage?: (usage: Usage) => void;
+    onActivity?: (line: string) => void;
+    onSettled?: () => void;
+  },
   writers: EventApplierWriters,
 ): EventApplier {
   let replyText = "";
@@ -532,10 +556,17 @@ export function makeEventApplier(
       const tail = ev.content.slice(msgWritten);
       if (tail) {
         writers.reply.write(tail);
-        debug.event("reply-complete-tail", { tailLen: tail.length, contentLen: ev.content.length });
+        debug.event("reply-complete-tail", {
+          tailLen: tail.length,
+          contentLen: ev.content.length,
+        });
       }
       if (ev.content.length < msgWritten) {
-        logWarn("delegate", { event: "reply-content-shorter-than-delta", contentLen: ev.content.length, written: msgWritten });
+        logWarn("delegate", {
+          event: "reply-content-shorter-than-delta",
+          contentLen: ev.content.length,
+          written: msgWritten,
+        });
       }
       msgWritten = 0;
       replyText = ev.content;
@@ -546,12 +577,18 @@ export function makeEventApplier(
       const prev = lastToolText.get(ev.toolCallId) ?? "";
       const add = newPortion(ev.text, prev);
       lastToolText.set(ev.toolCallId, ev.text);
-      if (add) writers.activity?.write(add.endsWith("\n") ? add : `${add}\n`);
+      if (add) {
+        opts.onActivity?.(add);
+        writers.activity?.write(add.endsWith("\n") ? add : `${add}\n`);
+      }
       return;
     }
     flushThinking();
     const lines = activityLines(ev, { showThinking: opts.showThinking });
-    if (lines.length) writers.activity?.write(lines.join(""));
+    if (lines.length) {
+      opts.onActivity?.(lines.join(""));
+      writers.activity?.write(lines.join(""));
+    }
   };
   return {
     handleEventLine,
@@ -595,31 +632,42 @@ const DelegateParams = Type.Object({
   }),
   task: Type.Optional(
     Type.String({
-      description: "The self-contained task to hand off. State purpose, scope, and any constraints explicitly. Required for fresh runs; optional when resuming via resumeFrom (if given, it is appended as extra guidance for this attempt).",
+      description:
+        "The self-contained task to hand off. State purpose, scope, and any constraints explicitly. Required for fresh runs; optional when resuming via resumeFrom (if given, it is appended as extra guidance for this attempt).",
     }),
   ),
   resumeFrom: Type.Optional(
     Type.String({
-      description: 'Resume a previously failed/cancelled run: the new delegate restores that run\'s session (original task, tool calls already made, partial findings) and continues from where it left off instead of starting over. Pass the earlier runId. When resuming, `task` is optional — if given, it is appended as extra guidance for this attempt. (pi host only.)',
+      description:
+        "Resume a previously failed/cancelled run: the new delegate restores that run's session (original task, tool calls already made, partial findings) and continues from where it left off instead of starting over. Pass the earlier runId. When resuming, `task` is optional — if given, it is appended as extra guidance for this attempt. (pi host only.)",
     }),
   ),
   cwd: Type.Optional(
-    Type.String({ description: "Working directory for the delegate (default: current project dir)." }),
+    Type.String({
+      description: "Working directory for the delegate (default: current project dir).",
+    }),
   ),
   model: Type.Optional(
-    Type.String({ description: 'Model override as "provider/id". Default: this role\'s configured model (delegate.agents.<role>.model), else inherit the current model.' }),
+    Type.String({
+      description:
+        'Model override as "provider/id". Default: this role\'s configured model (delegate.agents.<role>.model), else inherit the current model.',
+    }),
   ),
   thinkingLevel: Type.Optional(
-    Type.String({ description: `Per-call thinking-level override: ${VALID_THINKING_LEVELS.join("|")}. Default: this role's configured level, else the global delegate.thinkingLevel, else Pi's own default.` }),
+    Type.String({
+      description: `Per-call thinking-level override: ${VALID_THINKING_LEVELS.join("|")}. Default: this role's configured level, else the global delegate.thinkingLevel, else Pi's own default.`,
+    }),
   ),
   async: Type.Optional(
     Type.Boolean({
-      description: "If true (default), return immediately with a runId. In long-lived sessions (interactive/rpc) a short notification is injected into chat when the delegate finishes; in one-shot sessions (print/json, e.g. `pi -p` / SDK) async auto-downgrades to sync and the result is returned here. If false, always block and return the output here.",
+      description:
+        "If true (default), return immediately with a runId. In long-lived sessions (interactive/rpc) a short notification is injected into chat when the delegate finishes; in one-shot sessions (print/json, e.g. `pi -p` / SDK) async auto-downgrades to sync and the result is returned here. If false, always block and return the output here.",
     }),
   ),
   showThinking: Type.Optional(
     Type.Boolean({
-      description: "If true, the delegate's thinking deltas are also written to the live activity file (default: false — only tool activity is shown).",
+      description:
+        "If true, the delegate's thinking deltas are also written to the live activity file (default: false — only tool activity is shown).",
     }),
   ),
   timeoutMinutes: Type.Optional(
@@ -632,11 +680,15 @@ const DelegateParams = Type.Object({
 type DelegateArgs = Static<typeof DelegateParams>;
 
 const CancelParams = Type.Object({
-  runId: Type.String({ description: "The runId returned by acp_delegate to cancel." }),
+  runId: Type.String({
+    description: "The runId returned by acp_delegate to cancel.",
+  }),
 });
 
 const WaitParams = Type.Object({
-  runId: Type.String({ description: "The runId returned by acp_delegate to wait for." }),
+  runId: Type.String({
+    description: "The runId returned by acp_delegate to wait for.",
+  }),
   timeout: Type.Optional(
     Type.Integer({
       description: `Maximum time to block waiting for the result, in milliseconds. Default ${WAIT_TIMEOUT_MS_DEFAULT} (10s); max ${WAIT_TIMEOUT_MS_MAX} (300s). Values below 1000 are treated as seconds (so 180 means 180s, not 180ms). If the delegate does not finish in time, returns "failed (not ready)" — do NOT keep waiting or retry; go do other work, and a completion notification will still be injected when it completes.`,
@@ -679,7 +731,6 @@ export function accumulateUsage(a: Usage | undefined, b: Usage): Usage {
   };
 }
 
-
 const agentListLine = (name: string): string => {
   const def = AGENTS[name];
   if (!def) return "";
@@ -718,14 +769,13 @@ Failure & resume:
 • To continue a failed/cancelled run instead of re-dispatching it, call acp_delegate again with resumeFrom: "<runId>" (pi host only): the new run restores the earlier session (history + partial work) and picks up where it left off.
 
 The delegate runs in its own clean pi process — it does NOT see this conversation's context. Give it everything it needs (paths, goals, constraints). Full results always go to a file so the chat context stays small.`,
-    promptSnippet:
-      'acp_delegate({ agent: "reviewer", task: "Review src/index.ts for race conditions" })',
+    promptSnippet: 'acp_delegate({ agent: "reviewer", task: "Review src/index.ts for race conditions" })',
     promptGuidelines: [
       "Delegate to get a focused result in a clean context, or to parallelize independent work.",
       "The sub-agent has NO access to this conversation — write a fully self-contained task.",
       "Prefer async=true and launch several; results arrive back automatically when each finishes.",
       "A FAILED notification (⚠️) means that task produced no usable result — read the excerpt and the output files, then decide whether to re-dispatch it before wrapping up.",
-      "A failed/cancelled run keeps its output files and can be resumed with resumeFrom: \"<runId>\" — prefer resuming over re-dispatching when the earlier work is worth keeping.",
+      'A failed/cancelled run keeps its output files and can be resumed with resumeFrom: "<runId>" — prefer resuming over re-dispatching when the earlier work is worth keeping.',
       "For changes you must apply yourself, delegate read-only investigation (reviewer/researcher/oracle) and keep the main context as the sole writer.",
     ],
     parameters: DelegateParams,
@@ -746,7 +796,13 @@ export function formatRunResult(run: DelegateRun): string {
     run.status === "completed"
       ? `Delegate **${run.agent}** (runId \`${run.runId}\`) completed (${exit})${timeoutNote}${remainingLineForWait(run.runId)}`
       : `Delegate **${run.agent}** (runId \`${run.runId}\`) ${run.status === "failed" ? "FAILED ⚠️" : run.status} (${exit})${timeoutNote}${remainingLineForWait(run.runId)}`;
-  return formatPayload(header, run.result?.file ?? "", run.task, run.result?.body, run.status === "failed" ? run.activityFile : undefined);
+  return formatPayload(
+    header,
+    run.result?.file ?? "",
+    run.task,
+    run.result?.body,
+    run.status === "failed" ? run.activityFile : undefined,
+  );
 }
 
 /** "exit 0" / "exit 1" / "exit SIGTERM" (signal shown when the child was
@@ -764,7 +820,9 @@ export function cancelledFileNote(runId: string, file: string): string {
 
 /** Count of OTHER delegates still in flight (running or queued), excluding self. */
 function remainingLineForWait(selfRunId: string): string {
-  const remaining = Array.from(runs.values()).filter((r) => (r.status === "running" || r.status === "queued") && r.runId !== selfRunId).length;
+  const remaining = Array.from(runs.values()).filter(
+    (r) => (r.status === "running" || r.status === "queued") && r.runId !== selfRunId,
+  ).length;
   return remaining > 0 ? ` ${remaining} delegate${remaining === 1 ? " is" : "s are"} still running.` : "";
 }
 
@@ -790,12 +848,18 @@ export function findUndeliveredRuns(all: DelegateRun[], excludeRunId?: string): 
  *  delivered. The caller commits the marking (covered[].injected = true) only
  *  after the carrier message is actually sent: if the send throws, the runs
  *  must stay undelivered so a later carrier can recover them. */
-export function buildRecoveryNotice(all: DelegateRun[], excludeRunId?: string): { text: string; covered: DelegateRun[] } {
+export function buildRecoveryNotice(
+  all: DelegateRun[],
+  excludeRunId?: string,
+): { text: string; covered: DelegateRun[] } {
   const pending = findUndeliveredRuns(all, excludeRunId);
   if (pending.length === 0) return { text: "", covered: [] };
   const anyFailed = pending.some((r) => r.status === "failed");
   const header = `⚠️ Recovery notice: ${pending.length} earlier delegate result${pending.length === 1 ? "" : "s"} never reached you (notification delivery failed).${anyFailed ? " At least one FAILED — that task's work is missing; read its result below and decide whether to re-dispatch before concluding." : ""}`;
-  return { text: [header, ...pending.map((r) => formatRunResult(r))].join("\n"), covered: pending };
+  return {
+    text: [header, ...pending.map((r) => formatRunResult(r))].join("\n"),
+    covered: pending,
+  };
 }
 
 /** Build a recovery notice for undelivered runs and mark each covered run
@@ -904,9 +968,13 @@ export function flushDelegateNotifications(): void {
   const lost = deliverable.filter((r) => !queued.has(r));
   const parts: string[] = [];
   if (lost.length > 0) {
-    parts.push(`⚠️ Recovery notice: ${lost.length} earlier delegate result${lost.length === 1 ? "" : "s"} never reached you (notification delivery failed); included below.`);
+    parts.push(
+      `⚠️ Recovery notice: ${lost.length} earlier delegate result${lost.length === 1 ? "" : "s"} never reached you (notification delivery failed); included below.`,
+    );
   }
-  parts.push(`[acp_delegate] ${deliverable.length} delegates finished (${okCount} completed${failedCount > 0 ? `, ${failedCount} FAILED` : ""}).`);
+  parts.push(
+    `[acp_delegate] ${deliverable.length} delegates finished (${okCount} completed${failedCount > 0 ? `, ${failedCount} FAILED` : ""}).`,
+  );
   for (const r of deliverable) parts.push(formatBatchRunSection(r));
   for (const r of deliverable) {
     if (mode === "separate" && r.usage && !r.usageReported) addDelegateUsage(r.usage);
@@ -920,17 +988,34 @@ export function flushDelegateNotifications(): void {
       send.call(pi, text, { deliverAs: "followUp" });
       sent = true;
     } catch (err) {
-      logError("delegate", { event: "notify-batch-error", error: String(err), runIds: deliverable.map((r) => r.runId).join(",") });
+      logError("delegate", {
+        event: "notify-batch-error",
+        error: String(err),
+        runIds: deliverable.map((r) => r.runId).join(","),
+      });
     }
   } else {
-    logWarn("delegate", { event: "notify-batch-skipped", reason: "sendUserMessage unavailable" });
+    logWarn("delegate", {
+      event: "notify-batch-skipped",
+      reason: "sendUserMessage unavailable",
+    });
   }
   for (const r of deliverable) {
     if (sent) r.injected = true;
     if (r.usage && !r.usageReported && (mode === "separate" || sent)) r.usageReported = true;
   }
-  debug.event("delegate-notify-batch", { count: deliverable.length, failed: failedCount, sent, runIds: deliverable.map((r) => r.runId).join(",") });
-  logInfo("delegate", { event: "notify-batch", count: deliverable.length, failed: failedCount, sent });
+  debug.event("delegate-notify-batch", {
+    count: deliverable.length,
+    failed: failedCount,
+    sent,
+    runIds: deliverable.map((r) => r.runId).join(","),
+  });
+  logInfo("delegate", {
+    event: "notify-batch",
+    count: deliverable.length,
+    failed: failedCount,
+    sent,
+  });
 }
 
 /** One per-run section of a batched notification: status header + task +
@@ -940,14 +1025,21 @@ export function formatBatchRunSection(run: DelegateRun): string {
   const status = failed ? "FAILED ⚠️" : "completed";
   const timeoutNote = run.timedOut ? ` (timed out: ${run.timedOut})` : "";
   const header = `[acp_delegate ${status}] **${run.agent}** (runId \`${run.runId}\`, ${exitLabel(run.result?.code ?? null, run.exitSignal)})${timeoutNote}`;
-  return formatPayload(header, run.result?.file ?? "", run.task, failed ? run.result?.body : undefined, failed ? run.activityFile : undefined);
+  return formatPayload(
+    header,
+    run.result?.file ?? "",
+    run.task,
+    failed ? run.result?.body : undefined,
+    failed ? run.activityFile : undefined,
+  );
 }
 
 function buildBatchTrailer(batch: DelegateRun[], anyFailed: boolean, mode: "merged" | "separate"): string {
-  const remaining = Array.from(runs.values()).filter((r) => (r.status === "running" || r.status === "queued")).length;
-  const remainingLine = remaining > 0
-    ? `${remaining} delegate${remaining === 1 ? " is" : "s are"} still running; keep doing other work and their notifications will arrive as they finish.`
-    : "No delegates are currently running.";
+  const remaining = Array.from(runs.values()).filter((r) => r.status === "running" || r.status === "queued").length;
+  const remainingLine =
+    remaining > 0
+      ? `${remaining} delegate${remaining === 1 ? " is" : "s are"} still running; keep doing other work and their notifications will arrive as they finish.`
+      : "No delegates are currently running.";
   let usageNote = "";
   if (mode === "separate") {
     const totalUsage = getDelegateUsage();
@@ -961,7 +1053,8 @@ function buildBatchTrailer(batch: DelegateRun[], anyFailed: boolean, mode: "merg
       (acc, r) => (r.usage && !r.usageReported ? accumulateUsage(acc, r.usage) : acc),
       undefined,
     );
-    if (batchUsage) usageNote = `\nBatch usage: tokens=${batchUsage.totalTokens.toLocaleString()} in=${batchUsage.input.toLocaleString()} out=${batchUsage.output.toLocaleString()}`;
+    if (batchUsage)
+      usageNote = `\nBatch usage: tokens=${batchUsage.totalTokens.toLocaleString()} in=${batchUsage.input.toLocaleString()} out=${batchUsage.output.toLocaleString()}`;
   }
   const closing = anyFailed
     ? "At least one delegate did NOT complete its task — its result is missing from your work. Read the error excerpts (and the result files if present), then decide whether to re-dispatch those tasks before wrapping up. This is an automated system notification, NOT a user message."
@@ -985,7 +1078,11 @@ function withUndeliveredNotice(result: AgentToolResult<unknown>): AgentToolResul
  *  once via this tool result). Returns null when the run was NOT injected,
  *  in which case the caller delivers the full payload via formatRunResult(). */
 export function injectedWaitMessage(
-  run: { injected?: boolean; readSuppressed?: boolean; result?: { file: string } },
+  run: {
+    injected?: boolean;
+    readSuppressed?: boolean;
+    result?: { file: string };
+  },
   runId: string,
   remainingLine: string,
 ): string | null {
@@ -1007,7 +1104,11 @@ export function buildWaitResult(
   content: string,
   mode: "merged" | "separate" = "separate",
   contentType = "text" as const,
-): { details: undefined; content: { type: "text"; text: string }[]; usage?: AgentToolResult<unknown>["usage"] } {
+): {
+  details: undefined;
+  content: { type: "text"; text: string }[];
+  usage?: AgentToolResult<unknown>["usage"];
+} {
   if (run.usage && !run.usageReported) {
     run.usageReported = true;
     if (mode === "merged") {
@@ -1015,13 +1116,25 @@ export function buildWaitResult(
       return {
         details: undefined,
         content: [{ type: contentType, text: content }],
-        usage: { ...run.usage, cost: cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } as AgentToolResult<unknown>["usage"],
+        usage: {
+          ...run.usage,
+          cost: cost ?? {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            total: 0,
+          },
+        } as AgentToolResult<unknown>["usage"],
       };
     } else {
       addDelegateUsage(run.usage);
     }
   }
-  return { details: undefined, content: [{ type: contentType, text: content }] };
+  return {
+    details: undefined,
+    content: [{ type: contentType, text: content }],
+  };
 }
 
 /** Build usage-aware result for cancel tool. */
@@ -1029,7 +1142,11 @@ export function buildCancelResult(
   run: DelegateRun,
   content: string,
   mode: "merged" | "separate" = "separate",
-): { details: undefined; content: { type: "text"; text: string }[]; usage?: AgentToolResult<unknown>["usage"] } {
+): {
+  details: undefined;
+  content: { type: "text"; text: string }[];
+  usage?: AgentToolResult<unknown>["usage"];
+} {
   if (run.usage && !run.usageReported) {
     run.usageReported = true;
     if (mode === "merged") {
@@ -1037,7 +1154,16 @@ export function buildCancelResult(
       return {
         details: undefined,
         content: [{ type: "text", text: content }],
-        usage: { ...run.usage, cost: cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } as AgentToolResult<unknown>["usage"],
+        usage: {
+          ...run.usage,
+          cost: cost ?? {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            total: 0,
+          },
+        } as AgentToolResult<unknown>["usage"],
       };
     } else {
       addDelegateUsage(run.usage);
@@ -1047,10 +1173,21 @@ export function buildCancelResult(
 }
 
 export function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof WaitParams> {
-  const exec = async (args: { runId: string; timeout?: number }, signal?: AbortSignal): Promise<AgentToolResult<unknown>> => {
+  const exec = async (
+    args: { runId: string; timeout?: number },
+    signal?: AbortSignal,
+  ): Promise<AgentToolResult<unknown>> => {
     const run = runs.get(args.runId);
     if (!run) {
-      return { details: undefined, content: [{ type: "text" as const, text: `No delegate run with runId \`${args.runId}\`. It may have already been reported or never existed.` }] };
+      return {
+        details: undefined,
+        content: [
+          {
+            type: "text" as const,
+            text: `No delegate run with runId \`${args.runId}\`. It may have already been reported or never existed.`,
+          },
+        ],
+      };
     }
     // Already finished (e.g. the model calls wait after the injected
     // notification, or the run was cancelled).
@@ -1058,7 +1195,11 @@ export function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof W
     if (run.status === "cancelled") {
       run.consumed = true;
       const file = run.result?.file || join(OUT_DIR, `${args.runId}.out`);
-      return buildWaitResult(run, `Delegate \`${args.runId}\` was cancelled. ${cancelledFileNote(args.runId, file)}${remainingLineForWait(args.runId)}`, displayMode);
+      return buildWaitResult(
+        run,
+        `Delegate \`${args.runId}\` was cancelled. ${cancelledFileNote(args.runId, file)}${remainingLineForWait(args.runId)}`,
+        displayMode,
+      );
     }
     if (run.status === "completed" || run.status === "failed") {
       // The delegate already finished. If the close handler already injected
@@ -1074,7 +1215,11 @@ export function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof W
       // a non-running, non-cancelled run always has a result. Guard anyway.
       run.consumed = true;
       if (!run.result) {
-        return buildWaitResult(run, `Delegate \`${args.runId}\` finished but no result is available (persist error).`, displayMode);
+        return buildWaitResult(
+          run,
+          `Delegate \`${args.runId}\` finished but no result is available (persist error).`,
+          displayMode,
+        );
       }
       return buildWaitResult(run, formatRunResult(run), displayMode);
     }
@@ -1082,14 +1227,26 @@ export function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof W
     // Refuse to park a second waiter on the same run: a second wait would
     // overwrite run.waiter and orphan the first wait's listener/timer.
     if (run.waiter) {
-      return { details: undefined, content: [{ type: "text", text: `Delegate \`${args.runId}\` already has a wait in progress; do not wait on it twice.` }] };
+      return {
+        details: undefined,
+        content: [
+          {
+            type: "text",
+            text: `Delegate \`${args.runId}\` already has a wait in progress; do not wait on it twice.`,
+          },
+        ],
+      };
     }
     // Park a waiter; the close handler resolves it (and the result is owned
     // by this tool, so no injection duplicates it).
     return new Promise((resolve) => {
       let settled = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const finish = (result: { details: undefined; content: { type: "text"; text: string }[]; usage?: AgentToolResult<unknown>["usage"] }) => {
+      const finish = (result: {
+        details: undefined;
+        content: { type: "text"; text: string }[];
+        usage?: AgentToolResult<unknown>["usage"];
+      }) => {
         if (settled) return;
         settled = true;
         run.waiter = undefined;
@@ -1098,7 +1255,15 @@ export function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof W
         resolve(result);
       };
       const onAbort = () => {
-        finish({ details: undefined, content: [{ type: "text", text: `Aborted; delegate \`${args.runId}\` is still running in the background. A notification will be injected when it finishes.` }] });
+        finish({
+          details: undefined,
+          content: [
+            {
+              type: "text",
+              text: `Aborted; delegate \`${args.runId}\` is still running in the background. A notification will be injected when it finishes.`,
+            },
+          ],
+        });
       };
       run.waiter = () => {
         run.consumed = true; // we own the result; suppress injection
@@ -1109,14 +1274,29 @@ export function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof W
           // usage (if any) is accumulated per displayMode like the early-return
           // path.
           const file = run.result?.file || join(OUT_DIR, `${run.runId}.out`);
-          finish(buildWaitResult(run, `Delegate \`${run.runId}\` was cancelled. ${cancelledFileNote(run.runId, file)}${remainingLineForWait(run.runId)}`, displayMode));
+          finish(
+            buildWaitResult(
+              run,
+              `Delegate \`${run.runId}\` was cancelled. ${cancelledFileNote(run.runId, file)}${remainingLineForWait(run.runId)}`,
+              displayMode,
+            ),
+          );
           return;
         }
         finish(buildWaitResult(run, formatRunResult(run), displayMode));
       };
       signal?.addEventListener("abort", onAbort);
       timer = setTimeout(
-        () => finish({ details: undefined, content: [{ type: "text", text: `Failed: delegate \`${args.runId}\` result not ready after ${Math.round(timeoutMs / 1000)}s. Do NOT keep waiting or retry — go do other work now. The run continues in the background and a completion notification (with the result file path) will be injected into the chat when it finishes.` }] }),
+        () =>
+          finish({
+            details: undefined,
+            content: [
+              {
+                type: "text",
+                text: `Failed: delegate \`${args.runId}\` result not ready after ${Math.round(timeoutMs / 1000)}s. Do NOT keep waiting or retry — go do other work now. The run continues in the background and a completion notification (with the result file path) will be injected into the chat when it finishes.`,
+              },
+            ],
+          }),
         timeoutMs,
       );
     });
@@ -1143,7 +1323,10 @@ export function makeDelegateCancelTool(_pi: ExtensionAPI): ToolDefinition<typeof
     const { runId } = params;
     const run = runs.get(runId);
     if (!run) {
-      return { details: undefined, content: [{ type: "text", text: `Unknown runId "${runId}".` }] };
+      return {
+        details: undefined,
+        content: [{ type: "text", text: `Unknown runId "${runId}".` }],
+      };
     }
     if (run.status !== "running" && run.status !== "queued") {
       return buildCancelResult(run, `Run ${runId} already ${run.status} (no action).`);
@@ -1160,8 +1343,15 @@ export function makeDelegateCancelTool(_pi: ExtensionAPI): ToolDefinition<typeof
       try {
         run.child?.kill("SIGTERM");
       } catch (err) {
-        debug.event("delegate-cancel-kill-error", { runId, error: String(err) });
-        logError("delegate", { event: "cancel-kill-error", runId, error: String(err) });
+        debug.event("delegate-cancel-kill-error", {
+          runId,
+          error: String(err),
+        });
+        logError("delegate", {
+          event: "cancel-kill-error",
+          runId,
+          error: String(err),
+        });
       }
     }
     delegateStatusWidget.poke();
@@ -1198,8 +1388,15 @@ function spawnDelegateChild(opts: {
     delegateSpawnOptions(opts.cwd, opts.env),
   ) as ChildProcess;
   child.stdin?.once("error", (e: Error) => {
-    debug.event("delegate-stdin-error", { runId: "pre-spawn", error: String(e) });
-    logError("delegate", { event: "stdin-error", runId: opts.runId, error: String(e) });
+    debug.event("delegate-stdin-error", {
+      runId: "pre-spawn",
+      error: String(e),
+    });
+    logError("delegate", {
+      event: "stdin-error",
+      runId: opts.runId,
+      error: String(e),
+    });
   });
   child.stdin?.end(delegateStdinText(opts.resumeFrom, opts.task));
   return child;
@@ -1239,12 +1436,18 @@ async function runDelegate(
       return `Cannot resume ${args.resumeFrom}: no session file at ${prevSession} (the run produced no assistant output, or the file was cleaned up). Re-dispatch the task fresh instead.`;
     }
   }
-  const taskText = args.task?.trim() || (args.resumeFrom ? "(resumed — the original task is in the session history)" : "");
+  const taskText =
+    args.task?.trim() || (args.resumeFrom ? "(resumed — the original task is in the session history)" : "");
 
   const cwd = args.cwd && args.cwd.trim() ? args.cwd : ctx.cwd;
   const childEnv = delegateChildEnv(parentDepth, maxDepth);
   const runId = `del_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
   const { cliArgs, tmpDir, isAsync, useJsonStream, sessionFile } = await buildChildArgs(args, agent.prompt, ctx, runId);
+  const providerIndex = cliArgs.indexOf("--provider");
+  const modelIndex = cliArgs.indexOf("--model");
+  const resolvedProvider = providerIndex >= 0 ? cliArgs[providerIndex + 1] : undefined;
+  const resolvedModelId = modelIndex >= 0 ? cliArgs[modelIndex + 1] : undefined;
+  const resolvedModel = resolvedProvider && resolvedModelId ? `${resolvedProvider}/${resolvedModelId}` : undefined;
   // One-shot modes (print/json = `pi -p` / SDK) exit after one turn, so async
   // injection (a follow-up turn) is never observed. Downgrade to sync there:
   // the result returns as the tool result within the same turn. Long-lived
@@ -1252,7 +1455,10 @@ async function runDelegate(
   const requestedAsync = args.async !== false;
   if (requestedAsync && !isAsync) {
     debug.event("delegate-async-downgraded", { reason: `mode=${ctx.mode}` });
-    logInfo("delegate", { event: "async-downgraded", reason: `mode=${ctx.mode}` });
+    logInfo("delegate", {
+      event: "async-downgraded",
+      reason: `mode=${ctx.mode}`,
+    });
   }
   // Per-call hard-timeout override (#286): the model sizes a specific run's
   // wall-clock budget instead of relying on the global acp.json/env default.
@@ -1260,8 +1466,28 @@ async function runDelegate(
   // no-output (idle) watchdog is intentionally left at its global value.
   const effectiveAsyncMs = resolvePerCallTimeoutMs(args.timeoutMinutes, delegatePolicy.asyncTimeoutMs);
   const effectiveSyncMs = resolvePerCallTimeoutMs(args.timeoutMinutes, delegatePolicy.syncTimeoutMs);
-  debug.event("delegate-spawn", { agent: args.agent, runId, cwd, async: isAsync, useJsonStream, cliArgs, resumedFrom: args.resumeFrom, sessionFile });
-  logInfo("delegate", { event: "spawn", agent: args.agent, runId, cwd, async: isAsync, useJsonStream, mode: ctx.mode, parentDepth, resumedFrom: args.resumeFrom, sessionFile });
+  debug.event("delegate-spawn", {
+    agent: args.agent,
+    runId,
+    cwd,
+    async: isAsync,
+    useJsonStream,
+    cliArgs,
+    resumedFrom: args.resumeFrom,
+    sessionFile,
+  });
+  logInfo("delegate", {
+    event: "spawn",
+    agent: args.agent,
+    runId,
+    cwd,
+    async: isAsync,
+    useJsonStream,
+    mode: ctx.mode,
+    parentDepth,
+    resumedFrom: args.resumeFrom,
+    sessionFile,
+  });
 
   // Prepared before spawn: everything from spawn() to the child event handlers
   // must stay synchronous — an await in between lets a fast spawn failure
@@ -1284,6 +1510,7 @@ async function runDelegate(
       startedAt: Date.now(),
       status: "queued",
       resumedFrom: args.resumeFrom,
+      model: resolvedModel,
     };
     runs.set(runId, run);
     delegateStatusWidget.poke();
@@ -1323,7 +1550,12 @@ async function runDelegate(
             debug.event("delegate-eof-grace", { runId, ms: EOF_GRACE_MS });
           },
         },
-        { eofGraceMs: EOF_GRACE_MS, idleMs: delegatePolicy.idleMs, timeoutMs: effectiveAsyncMs, killGraceMs: KILL_GRACE_MS },
+        {
+          eofGraceMs: EOF_GRACE_MS,
+          idleMs: delegatePolicy.idleMs,
+          timeoutMs: effectiveAsyncMs,
+          killGraceMs: KILL_GRACE_MS,
+        },
       );
       // Two stream files are fed from the --mode json event stream: text_delta
       // tokens go to the reply stream (.out), tool activity (and optionally
@@ -1345,6 +1577,10 @@ async function runDelegate(
           showThinking: args.showThinking === true,
           onUsage: (u) => {
             run.usage = accumulateUsage(run.usage, u);
+          },
+          onActivity: (line) => {
+            const compact = line.replace(/\s+/g, " ").trim();
+            if (compact) run.activity = compact.length <= 120 ? compact : `${compact.slice(0, 119)}…`;
           },
           onSettled: () => {
             run.agentSettled = true;
@@ -1386,6 +1622,10 @@ async function runDelegate(
           run.exitCode = code;
           run.exitSignal = signal ?? undefined;
           const output = applier.getReplyText().trim();
+          if (output) {
+            const compact = output.replace(/\s+/g, " ");
+            run.summary = compact.length <= 160 ? compact : `${compact.slice(0, 159)}…`;
+          }
           let body: string;
           if (code === 0) {
             body = output || "(no output)";
@@ -1410,9 +1650,20 @@ async function runDelegate(
               const fallback = stderrText.trim();
               await appendFile(replyFile, fallback ? `${fallback}\n` : "(no output)\n");
             }
-            run.result = { code, file: replyFile, body: stderrText.trim() || output || "(no output)" };
+            run.result = {
+              code,
+              file: replyFile,
+              body: stderrText.trim() || output || "(no output)",
+            };
             run.finishedAt = Date.now();
-            debug.event("delegate-done", { runId, code, status: run.status, injected: false, outLen: output.length, file: replyFile });
+            debug.event("delegate-done", {
+              runId,
+              code,
+              status: run.status,
+              injected: false,
+              outLen: output.length,
+              file: replyFile,
+            });
             run.waiter?.();
             delegateStatusWidget.poke();
             return;
@@ -1437,15 +1688,51 @@ async function runDelegate(
             // If a wait is parked on this run, wake it — it owns the result now
             // (and marks consumed so we don't double-deliver by injecting).
             if (run.waiter) {
-              debug.event("delegate-done", { runId, code, status: run.status, injected: false, via: "wait", outLen: output.length, file });
-              logInfo("delegate", { event: "done", runId, agent: args.agent, code, status: run.status, injected: false, via: "wait", outLen: output.length, file });
+              debug.event("delegate-done", {
+                runId,
+                code,
+                status: run.status,
+                injected: false,
+                via: "wait",
+                outLen: output.length,
+                file,
+              });
+              logInfo("delegate", {
+                event: "done",
+                runId,
+                agent: args.agent,
+                code,
+                status: run.status,
+                injected: false,
+                via: "wait",
+                outLen: output.length,
+                file,
+              });
               run.waiter();
               delegateStatusWidget.poke();
               return;
             }
             if (run.consumed) {
-              debug.event("delegate-done", { runId, code, status: run.status, injected: false, via: "consumed", outLen: output.length, file });
-              logInfo("delegate", { event: "done", runId, agent: args.agent, code, status: run.status, injected: false, via: "consumed", outLen: output.length, file });
+              debug.event("delegate-done", {
+                runId,
+                code,
+                status: run.status,
+                injected: false,
+                via: "consumed",
+                outLen: output.length,
+                file,
+              });
+              logInfo("delegate", {
+                event: "done",
+                runId,
+                agent: args.agent,
+                code,
+                status: run.status,
+                injected: false,
+                via: "consumed",
+                outLen: output.length,
+                file,
+              });
               delegateStatusWidget.poke();
               return;
             }
@@ -1457,21 +1744,66 @@ async function runDelegate(
             // FAILED notification must still go out.
             if (run.status === "completed" && shouldSuppressRead(run, delegateNotifyIfRead)) {
               applyReadSuppression(run, runId);
-              debug.event("delegate-done", { runId, code, status: run.status, injected: false, suppressed: true, outLen: output.length, file });
-              logInfo("delegate", { event: "done", runId, agent: args.agent, code, status: run.status, injected: false, suppressed: true, outLen: output.length, file });
+              debug.event("delegate-done", {
+                runId,
+                code,
+                status: run.status,
+                injected: false,
+                suppressed: true,
+                outLen: output.length,
+                file,
+              });
+              logInfo("delegate", {
+                event: "done",
+                runId,
+                agent: args.agent,
+                code,
+                status: run.status,
+                injected: false,
+                suppressed: true,
+                outLen: output.length,
+                file,
+              });
               delegateStatusWidget.poke();
               return;
             }
             scheduleRunNotification(pi, run);
-            debug.event("delegate-done", { runId, code, status: run.status, injected: false, queued: true, outLen: output.length, file });
-            logInfo("delegate", { event: "done", runId, agent: args.agent, code, status: run.status, injected: false, queued: true, outLen: output.length, file });
+            debug.event("delegate-done", {
+              runId,
+              code,
+              status: run.status,
+              injected: false,
+              queued: true,
+              outLen: output.length,
+              file,
+            });
+            logInfo("delegate", {
+              event: "done",
+              runId,
+              agent: args.agent,
+              code,
+              status: run.status,
+              injected: false,
+              queued: true,
+              outLen: output.length,
+              file,
+            });
             delegateStatusWidget.poke();
           } catch (err) {
             run.status = "failed";
             run.finishedAt = Date.now();
-            run.result = run.result ?? { code, file: replyFile, body: `result persistence error: ${String(err)}` };
+            run.result = run.result ?? {
+              code,
+              file: replyFile,
+              body: `result persistence error: ${String(err)}`,
+            };
             debug.event("delegate-done-error", { runId, error: String(err) });
-            logError("delegate", { event: "done-error", runId, agent: args.agent, error: String(err) });
+            logError("delegate", {
+              event: "done-error",
+              runId,
+              agent: args.agent,
+              error: String(err),
+            });
             notifyTerminalFailure(pi, run);
             delegateStatusWidget.poke();
           }
@@ -1501,7 +1833,12 @@ async function runDelegate(
           run.finishedAt = Date.now();
           run.result = { code: null, file: replyFile, body };
           debug.event("delegate-spawn-error", { runId, error: String(err) });
-          logError("delegate", { event: "spawn-error", runId, agent: args.agent, error: String(err) });
+          logError("delegate", {
+            event: "spawn-error",
+            runId,
+            agent: args.agent,
+            error: String(err),
+          });
           if (run.status === "failed") notifyTerminalFailure(pi, run);
           else run.waiter?.();
           delegateStatusWidget.poke();
@@ -1552,9 +1889,7 @@ async function runDelegate(
   const result = await waitForChild(child, signal, effectiveSyncMs);
   void cleanupTmp(tmpDir);
   const body =
-    result.timedOut || result.code !== 0
-      ? (result.stderr.trim() || "(no stderr)")
-      : (result.stdout || "(no output)");
+    result.timedOut || result.code !== 0 ? result.stderr.trim() || "(no stderr)" : result.stdout || "(no output)";
   const file = await persistResult(runId, body);
   return formatSyncResult(args.agent, runId, taskText, result, file);
 }
@@ -1564,7 +1899,13 @@ export async function buildChildArgs(
   rolePrompt: string,
   ctx: ExtensionContext,
   runId: string,
-): Promise<{ cliArgs: string[]; tmpDir: string; isAsync: boolean; useJsonStream: boolean; sessionFile: string | null }> {
+): Promise<{
+  cliArgs: string[];
+  tmpDir: string;
+  isAsync: boolean;
+  useJsonStream: boolean;
+  sessionFile: string | null;
+}> {
   const tmpDir = await mkdtemp(join(tmpdir(), "acp-delegate-"));
   // Combine the role prompt with a small framing instruction so the child
   // treats the positional message as the task to execute.
@@ -1590,9 +1931,7 @@ export async function buildChildArgs(
   // omp has no session flags and keeps `--no-session`.
   const useSession = isPiHost(ctx.sessionManager);
   const sessionFile = useSession ? join(OUT_DIR, `${runId}${SESSION_EXT}`) : null;
-  const sessionArgs = sessionFile
-    ? ["--session", sessionFile, "--session-dir", OUT_DIR]
-    : ["--no-session"];
+  const sessionArgs = sessionFile ? ["--session", sessionFile, "--session-dir", OUT_DIR] : ["--no-session"];
   const cliArgs = useJsonStream
     ? ["--mode", "json", ...sessionArgs, "--append-system-prompt", promptFile]
     : ["-p", ...sessionArgs, "--append-system-prompt", promptFile];
@@ -1604,7 +1943,7 @@ export async function buildChildArgs(
   // it - this is not a security boundary.
   const agentDef = AGENTS[args.agent];
   if (agentDef?.restricted) {
-    const merged = [...new Set([...agentDef.tools.split(",").map(s => s.trim()), ...ACP_TOOLS])];
+    const merged = [...new Set([...agentDef.tools.split(",").map((s) => s.trim()), ...ACP_TOOLS])];
     cliArgs.push("--tools", merged.join(","));
   }
 
@@ -1667,7 +2006,11 @@ export async function buildChildArgs(
     if (isValidThinkingLevel(thinkingPick)) {
       cliArgs.push("--thinking", thinkingPick);
     } else {
-      logWarn("delegate", { event: "invalid-thinking-level", agent: args.agent, value: thinkingPick });
+      logWarn("delegate", {
+        event: "invalid-thinking-level",
+        agent: args.agent,
+        value: thinkingPick,
+      });
     }
   }
 
@@ -1682,7 +2025,11 @@ interface ChildResult {
   timedOut: boolean;
 }
 
-function waitForChild(child: ChildProcess, signal: AbortSignal | undefined, timeoutMs: number | null): Promise<ChildResult> {
+function waitForChild(
+  child: ChildProcess,
+  signal: AbortSignal | undefined,
+  timeoutMs: number | null,
+): Promise<ChildResult> {
   return new Promise((resolve) => {
     const stdoutChunks: Buffer[] = [];
     let stderrText = "";
@@ -1750,7 +2097,7 @@ function formatSyncResult(agent: string, runId: string, task: string, r: ChildRe
   if (r.code === 0 && !r.timedOut) {
     return formatPayload(header, file, task);
   }
-  const body = r.timedOut ? "(timed out)" : (r.stderr.trim() || "(no stderr)");
+  const body = r.timedOut ? "(timed out)" : r.stderr.trim() || "(no stderr)";
   return formatPayload(header, file, task, body);
 }
 
@@ -1769,10 +2116,7 @@ export function effectiveExitCode(code: number | null, output: string, stderr: s
  *  run's file holds only partial output with no failure marker, so the model
  *  cannot tell it failed from the file — failure notifications are never
  *  suppressed (failures are loud). */
-export function shouldSuppressRead(
-  run: { readAt?: number; finishedAt?: number },
-  mode: "skip" | "always",
-): boolean {
+export function shouldSuppressRead(run: { readAt?: number; finishedAt?: number }, mode: "skip" | "always"): boolean {
   if (mode !== "skip") return false;
   if (run.readAt === undefined || run.finishedAt === undefined) return false;
   return run.readAt >= run.finishedAt;
@@ -1788,8 +2132,19 @@ export function applyReadSuppression(run: DelegateRun, runId: string): void {
     addDelegateUsage(run.usage);
     run.usageReported = true;
   }
-  debug.event("delegate-inject-suppressed", { runId, reason: "result-file-read", readAt: run.readAt, finishedAt: run.finishedAt });
-  logInfo("delegate", { event: "inject-suppressed", runId, reason: "result-file-read", readAt: run.readAt, finishedAt: run.finishedAt });
+  debug.event("delegate-inject-suppressed", {
+    runId,
+    reason: "result-file-read",
+    readAt: run.readAt,
+    finishedAt: run.finishedAt,
+  });
+  logInfo("delegate", {
+    event: "inject-suppressed",
+    runId,
+    reason: "result-file-read",
+    readAt: run.readAt,
+    finishedAt: run.finishedAt,
+  });
 }
 
 /** Apply read-suppression immediately when a qualifying read just happened.
@@ -1823,8 +2178,15 @@ export function injectResult(
 ): boolean {
   const send = pi.sendUserMessage;
   if (typeof send !== "function") {
-    debug.event("delegate-inject-skipped", { runId, reason: "sendUserMessage unavailable" });
-    logWarn("delegate", { event: "inject-skipped", runId, reason: "sendUserMessage unavailable" });
+    debug.event("delegate-inject-skipped", {
+      runId,
+      reason: "sendUserMessage unavailable",
+    });
+    logWarn("delegate", {
+      event: "inject-skipped",
+      runId,
+      reason: "sendUserMessage unavailable",
+    });
     return false;
   }
   const failed = status === "failed";
@@ -1834,14 +2196,14 @@ export function injectResult(
   // the 2nd to return → "3 still running" → the model knows to keep waiting).
   // The current run is already non-running (status flipped just before this),
   // so counting in-flight runs (running or queued) gives exactly the remaining ones.
-  const remaining = Array.from(runs.values()).filter((r) => (r.status === "running" || r.status === "queued")).length;
+  const remaining = Array.from(runs.values()).filter((r) => r.status === "running" || r.status === "queued").length;
   const remainingLine =
     remaining > 0
       ? ` ${remaining} delegate${remaining === 1 ? " is" : "s are"} still running; keep doing other work and their notifications will arrive as they finish.`
       : " No delegates are currently running.";
   const timeoutNote = timedOut ? ` (timed out: ${timedOut})` : "";
   let usageNote = "";
-  
+
   if (mode === "separate") {
     // In separate mode, accumulate this run's usage first (unless it was
     // already reported via a wait/cancel), then show the cumulative total.
@@ -1858,11 +2220,16 @@ export function injectResult(
     // In merged mode, show per-run usage
     const lines: string[] = [];
     if (usage.totalTokens) lines.push(`tokens=${usage.totalTokens.toLocaleString()}`);
-    if (usage.input || usage.output) lines.push(`in=${usage.input.toLocaleString()} out=${usage.output.toLocaleString()}`);
+    if (usage.input || usage.output)
+      lines.push(`in=${usage.input.toLocaleString()} out=${usage.output.toLocaleString()}`);
     if (usage.cacheRead) lines.push(`cache_read=${usage.cacheRead.toLocaleString()}`);
     if (usage.cacheWrite) lines.push(`cache_write=${usage.cacheWrite.toLocaleString()}`);
     if (usage.cost && typeof usage.cost === "object") {
-      const c = usage.cost as { total?: number; input?: number; output?: number };
+      const c = usage.cost as {
+        total?: number;
+        input?: number;
+        output?: number;
+      };
       if (typeof c.total === "number" && c.total > 0) {
         lines.push(`cost=$${c.total.toFixed(4)}`);
       } else if ((typeof c.input === "number" && c.input > 0) || (typeof c.output === "number" && c.output > 0)) {
@@ -1871,13 +2238,15 @@ export function injectResult(
     }
     if (lines.length) usageNote = ` Usage: ${lines.join(", ")}.`;
   }
-  
+
   const closing = failed
     ? "This delegate did NOT complete its task — its result is missing from your work. Read the error excerpt (and the result file if present), then decide whether to re-dispatch the task before wrapping up. This is an automated system notification, NOT a user message."
     : "This is an automated system notification, NOT a user message. Read the result file if you need the details, then continue your original task; do not treat this as a new user request.";
   const header = `[acp_delegate ${statusLabel}] **${agent}** (runId \`${runId}\`, ${exitLabel(code, signal)})${timeoutNote}${remainingLine}${usageNote} ${closing}`;
   const { text: recoveryText, covered } = buildRecoveryNotice(Array.from(runs.values()), runId);
-  const text = formatPayload(header, file, task, failed ? body : undefined, failed ? activityFile : undefined) + (recoveryText ? `\n\n${recoveryText}` : "");
+  const text =
+    formatPayload(header, file, task, failed ? body : undefined, failed ? activityFile : undefined) +
+    (recoveryText ? `\n\n${recoveryText}` : "");
   try {
     // sendUserMessage is fire-and-forget (returns void): it enqueues a
     // follow-up turn. Interactive/rpc sessions consume it via their main loop;
@@ -1889,7 +2258,12 @@ export function injectResult(
     return true;
   } catch (err) {
     debug.event("delegate-inject-error", { runId, error: String(err) });
-    logError("delegate", { event: "inject-error", runId, agent, error: String(err) });
+    logError("delegate", {
+      event: "inject-error",
+      runId,
+      agent,
+      error: String(err),
+    });
     return false;
   }
 }
@@ -1921,7 +2295,10 @@ function formatPayload(header: string, file: string, task: string, body?: string
     lines.push("", "(result could not be persisted to a file)");
   }
   if (activityFile) {
-    lines.push(`Activity log: \`${activityFile}\``, "(tool calls and their output, newest at the end — read it to see where the run went wrong)");
+    lines.push(
+      `Activity log: \`${activityFile}\``,
+      "(tool calls and their output, newest at the end — read it to see where the run went wrong)",
+    );
   }
   if (body) {
     lines.push("", "Output:", "~~~", truncate(body, RESULT_SUMMARY_CHARS), "~~~");
@@ -1957,7 +2334,12 @@ async function persistResult(runId: string, body: string): Promise<string> {
     return file;
   } catch (err) {
     debug.event("delegate-persist-error", { runId, file, error: String(err) });
-    logError("delegate", { event: "persist-error", runId, file, error: String(err) });
+    logError("delegate", {
+      event: "persist-error",
+      runId,
+      file,
+      error: String(err),
+    });
     return "";
   }
 }
