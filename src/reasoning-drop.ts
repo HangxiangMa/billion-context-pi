@@ -9,9 +9,11 @@ type AgentMessage = SessionMessageEntry["message"];
  *  the anchors that keep block summaries addressable), so their thinking
  *  rides along every request as an unreclaimable context floor. This pass
  *  removes `thinking` parts at request time (persisted history is never
- *  modified) from closed-turn compress messages whose total reasoning length
- *  exceeds `threshold`. The active round (from the last genuine user message
- *  onward) is never touched. */
+ *  modified) from closed-round compress messages whose total reasoning length
+ *  exceeds `threshold`. A round is closed on ROUND EVIDENCE, not on user
+ *  messages: the compress tool result must have arrived and at least one
+ *  message must exist after it. The in-flight round (result still missing or
+ *  still the last message) is never touched [#348]. */
 export interface CompressReasoningConfig {
   /** Master switch. Default: true. `drop: false` disables the pass entirely
    *  (kill-switch; also the recipe for providers whose thinking items are
@@ -54,6 +56,29 @@ function hasCompressCall(content: unknown): boolean {
   });
 }
 
+function compressCallIds(content: unknown): string[] {
+  if (!Array.isArray(content)) return [];
+  return content
+    .filter((p) => {
+      const b = p as { type?: string; name?: string };
+      return b?.type === "toolCall" && b.name === "compress";
+    })
+    .map((p) => (p as { id?: unknown }).id)
+    .filter((id): id is string => typeof id === "string");
+}
+
+/** toolCallId -> index of the message carrying its tool result. Pi gives
+ *  tool results their own `toolResult` role with a top-level `toolCallId`. */
+function resultIndexByCallId(messages: AgentMessage[]): Map<string, number> {
+  const map = new Map<string, number>();
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i] as { role?: string; toolCallId?: unknown };
+    if (msg?.role !== "toolResult" || typeof msg.toolCallId !== "string") continue;
+    if (!map.has(msg.toolCallId)) map.set(msg.toolCallId, i);
+  }
+  return map;
+}
+
 function reasoningLength(content: unknown): number {
   if (!Array.isArray(content)) return 0;
   return content.reduce((n, p) => (isThinking(p) ? n + p.thinking.length : n), 0);
@@ -61,9 +86,13 @@ function reasoningLength(content: unknown): number {
 
 /** Request-time pass aligned with opencode-acp #377: remove `thinking` parts
  *  from a message only when ALL gates hold —
- *  1. closed turn: the message is strictly before the last genuine user
- *     message (pi gives tool results their own `toolResult` role, so every
- *     `user` message is genuine);
+ *  1. closed round [#348]: EVERY `compress` toolCall in the message has its
+ *     tool-result message (role `toolResult`, matching `toolCallId`) at a
+ *     later index, and at least one message exists after that result (the
+ *     round has demonstrably moved on). A compress call without a result, or
+ *     whose result is still the last message, is in flight and never touched
+ *     — no user message is required, so long agentic sessions do close
+ *     rounds; a synthetic nudge pushed later cannot retroactively close one;
  *  2. selector: the message carries a `toolCall` part with name "compress"
  *     (only compress; other protected tools would need their own explicit
  *     config);
@@ -75,17 +104,20 @@ export function dropCompressReasoning(messages: AgentMessage[], cfg?: CompressRe
   const { drop, threshold } = resolveReasoningDrop(cfg);
   if (!drop || messages.length === 0) return messages;
   try {
-    let lastUser = -1;
-    for (let i = 0; i < messages.length; i++) {
-      if ((messages[i] as { role?: string }).role === "user") lastUser = i;
-    }
-    if (lastUser < 0) return messages;
+    const last = messages.length - 1;
+    const resultAt = resultIndexByCallId(messages);
     let changed = false;
     const out = messages.slice();
-    for (let i = 0; i < lastUser; i++) {
+    for (let i = 0; i <= last; i++) {
       const msg = messages[i] as { role?: string; content?: unknown };
       if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
       if (!hasCompressCall(msg.content)) continue;
+      const ids = compressCallIds(msg.content);
+      const closed = ids.length > 0 && ids.every((id) => {
+        const ri = resultAt.get(id);
+        return ri !== undefined && ri > i && ri < last;
+      });
+      if (!closed) continue;
       if (reasoningLength(msg.content) <= threshold) continue;
       out[i] = {
         ...(msg as object),
