@@ -221,6 +221,10 @@ export function coreOutToAgentMessages(
 ): AgentMessage[] {
   const out: AgentMessage[] = [];
   const emittedSplit = new Set<string>();
+  const kernelTextByCallId = new Map<string, string>();
+  for (const core of coreOut) {
+    if (core.toolCallId && core.text) kernelTextByCallId.set(core.toolCallId, core.text);
+  }
 
   for (const core of coreOut) {
     if (core.id.startsWith("acp_summary_")) continue;
@@ -246,16 +250,48 @@ export function coreOutToAgentMessages(
         .filter((id): id is string => !!id),
     );
 
-    out.push(reconstructToolCallMessage(original, core, survivingCallIds));
+    out.push(reconstructToolCallMessage(original, core, survivingCallIds, kernelTextByCallId));
   }
 
   return out;
+}
+
+function compactedArgsFrom(kernelText: string | undefined, originalArgs: unknown): unknown | null {
+  if (!kernelText) return null;
+  const start = kernelText.indexOf("{");
+  if (start < 0) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(kernelText.slice(start));
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  if (safeStringify(parsed) === safeStringify(originalArgs)) return null;
+  return parsed;
+}
+
+function syncToolCallArgs(
+  blocks: unknown[],
+  kernelTextFor: (callId: string) => string | undefined,
+): unknown[] {
+  let changed = false;
+  const out = blocks.map((block) => {
+    const b = block as { type?: string; id?: string; arguments?: unknown };
+    if (b.type !== "toolCall" || !b.id) return block;
+    const compacted = compactedArgsFrom(kernelTextFor(b.id), b.arguments);
+    if (compacted === null) return block;
+    changed = true;
+    return { ...b, arguments: compacted };
+  });
+  return changed ? out : blocks;
 }
 
 function reconstructToolCallMessage(
   original: AgentMessage,
   firstCore: CoreMessage,
   survivingCallIds: Set<string>,
+  kernelTextByCallId: Map<string, string>,
 ): AgentMessage {
   const base = original as AnyMessage;
   const match = firstCore.text ? firstCore.text.match(REF_TAG) : null;
@@ -272,7 +308,10 @@ function reconstructToolCallMessage(
       if (b.type === "toolCall") return survivingCallIds.has(b.id ?? "");
       return true;
     });
-    const peeled2 = peelRefTagBlocks(filtered2);
+    const peeled2 = syncToolCallArgs(
+      peelRefTagBlocks(filtered2),
+      (callId) => kernelTextByCallId.get(callId),
+    );
     return { ...(original as object), content: peeled2 } as AgentMessage;
   }
 
@@ -288,7 +327,10 @@ function reconstructToolCallMessage(
     return true;
   });
 
-  const peeled = peelRefTagBlocks(filtered);
+  const peeled = syncToolCallArgs(
+    peelRefTagBlocks(filtered),
+    (callId) => kernelTextByCallId.get(callId),
+  );
   const stableTag = rewriteTagTokens(tag, coreBodyOf(firstCore.text ?? "", tag));
   const lastTextIdx = [...peeled].reverse().findIndex((b) => (b as { type?: string }).type === "text");
   if (lastTextIdx >= 0) {
@@ -309,14 +351,25 @@ function coreBodyOf(coreText: string, tag: string): string {
 }
 
 function patchRefTag(original: AgentMessage, core: CoreMessage): AgentMessage {
-  const match = core.text ? core.text.match(REF_TAG) : null;
-  const tag = match ? match[0] : null;
-  if (!tag) return original;
   const base = original as AnyMessage;
   // Skip tag injection for assistant messages — the model sees tags on its own
   // previous responses and echoes them, causing visible tag fragments in the terminal.
   // The model can still reference assistant messages by inferring refs from context.
-  if (base.role === "assistant") return original;
+  if (base.role === "assistant") {
+    if (core.contentType === "tool-call" && core.toolCallId) {
+      const rawBlocks = Array.isArray(base.content) ? base.content : [];
+      const synced = syncToolCallArgs(rawBlocks, (callId) =>
+        callId === core.toolCallId ? core.text : undefined,
+      );
+      if (synced !== rawBlocks) {
+        return { ...(original as object), content: synced } as AgentMessage;
+      }
+    }
+    return original;
+  }
+  const match = core.text ? core.text.match(REF_TAG) : null;
+  const tag = match ? match[0] : null;
+  if (!tag) return original;
   // Honor kernel body mutations (emergency truncation of large tool-results,
   // future rewrites): if core.text's body differs from the original text,
   // rebuild from the kernel body — otherwise truncation never reaches the model.
