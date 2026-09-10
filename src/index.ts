@@ -19,6 +19,8 @@ import { makeStatusTool } from "./status-tool.js";
 import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, cancelDelegateRun, guideDelegate, runningRunsSnapshot, fleetRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage, setDelegatePolicy, setDelegateDefaults, setDelegateNotifyIfRead, markDelegateResultRead, markDelegateRunReadByCommand, shutdownDelegates, reapOrphanedDelegates } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages, extractText } from "./messages.js";
+import { countThinkingChars, dropCompressReasoning } from "./reasoning-drop.js";
+import { collapseAssistantDegeneration, degenerationNotice, lastAssistantRuns, resolveDegenerationGuard } from "./degeneration.js";
 import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import { openFleetInspector } from "./fleet-inspector.js";
@@ -267,6 +269,14 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
   });
 }
 
+// [#351] Terminal-echo dedup for the degeneration recovery notice: pi fires
+// the context event multiple times per assistant reply, so without this the
+// same notify would spam the terminal on every event while the degenerated
+// turn stays the most recent one. Keyed by session + top run so a NEW
+// degeneration (different count/char) re-notifies. Per-process, like the
+// other one-shot warn flags (ompWarned, proxyStandDownWarned).
+let lastDegNoticeKey: string | null = null;
+
 // The core integration: Pi's `context` event fires before every LLM call with the
 // messages about to be sent. We run acp-kernel's processTurn (prune + ref-tag +
 // nudge decision) and return the transformed AgentMessage[].
@@ -428,7 +438,56 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     });
 
     const originalById = collectOriginals(entries);
-    const rebuilt = coreOutToAgentMessages(turn.messages, originalById);
+    let rebuilt = coreOutToAgentMessages(turn.messages, originalById);
+    // [#336] Request-time reasoning drop, aligned with opencode-acp #377:
+    // compress calls are hard-exempt from compression, so their thinking
+    // rides along every request as an unreclaimable floor. Round closure is
+    // judged on tool-result evidence [#348]; applied BEFORE the nudge push
+    // so a synthetic user-role nudge can never count as the trailing
+    // "message after the result" and close an in-flight round. Persisted
+    // history is never modified — this only rewrites the outgoing view,
+    // rebuilt fresh from entries on every event.
+    const reasoningDrop = runtime.reasoningDropFor(ctx);
+    const droppedThinking = dropCompressReasoning(rebuilt, reasoningDrop);
+    if (droppedThinking !== rebuilt) {
+      const droppedChars = countThinkingChars(rebuilt) - countThinkingChars(droppedThinking);
+      debug.event("reasoning-drop", { sid, droppedChars, drop: reasoningDrop.drop, threshold: reasoningDrop.threshold });
+    }
+    rebuilt = droppedThinking;
+    // [#351] Request-time degenerate-repeat collapse: models occasionally
+    // degenerate into long single-codepoint runs (observed: 4655×「【」 in one
+    // thinking block, escalating over turns until the turn aborts). pi replays
+    // prior assistant thinking back to the provider (reasoning_content / text)
+    // on every subsequent request, so a degenerated tail poisons every later
+    // prompt via continuation bias and the session dies in an abort loop.
+    // Collapse runs >= minRun in assistant text/thinking of the outgoing view
+    // (persisted history untouched — rebuilt is fresh from entries each event),
+    // and while the LAST assistant message is degenerated append a one-shot
+    // recovery notice. Position-based self-limiting: a fresh model turn makes
+    // the old message non-last, so no persistent state and no accumulation
+    // (#223 lesson). Tail detection runs on the PERSISTED ORIGINALS (not
+    // rebuilt): thinking-only aborted turns never reach rebuilt (projectMessage
+    // drops them — empty text would 400 on OpenAI-compatible providers), yet
+    // they are still "the previous turn" as far as the model's continuation is
+    // concerned; the notice must fire there too.
+    const degCfg = resolveDegenerationGuard(runtime.adapter.degenerationGuard);
+    const tailRuns = degCfg.enabled ? lastAssistantRuns([...originalById.values()], degCfg.minRun) : null;
+    const deg = collapseAssistantDegeneration(rebuilt, degCfg);
+    if (deg.messages !== rebuilt) {
+      rebuilt = deg.messages;
+      const maxRun = deg.evidence.reduce((m, e) => e.runs.reduce((x, r) => Math.max(x, r.count), m), 0);
+      logWarn("degeneration", { sid, event: "runs-collapsed", msgs: deg.evidence.length, maxRun, minRun: degCfg.minRun });
+      debug.event("degeneration-collapsed", { sid, msgs: deg.evidence.length, maxRun });
+    }
+    if (tailRuns) {
+      rebuilt.push(degenerationNotice(tailRuns));
+      const top = [...tailRuns].sort((a, b) => b.count - a.count)[0]!;
+      logInfo("degeneration", { sid, event: "recovery-notice", maxRun: top.count });
+      if (ctx.hasUI && lastDegNoticeKey !== `${sid}:${top.count}:${top.char.codePointAt(0)}`) {
+        lastDegNoticeKey = `${sid}:${top.count}:${top.char.codePointAt(0)}`;
+        ctx.ui.notify(`[ACP] previous turn ended in degenerate generation (${top.count}× repeat) — the repeated segment was truncated above and a recovery notice injected.`);
+      }
+    }
     const debugOn = debug.enabled;
 
     const turnKey = lastUserMessageId(entries) ?? sid;

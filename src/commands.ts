@@ -159,7 +159,8 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
   const imageTokens = collectImageTokens(entries, modelSupportsImages(ctx.model));
   const imageTokensTotal = [...imageTokens.values()].reduce((a, b) => a + b, 0);
-  const sessionTokens = !anchorStale && realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : defaultCountTokens(coreMessages.map((m) => m.text ?? "").join("\n")) + imageTokensTotal;
+  const thinkingTokensTotal = coreMessages.reduce((sum, m) => sum + (m.thinkingTokens ?? 0), 0);
+  const sessionTokens = !anchorStale && realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : defaultCountTokens(coreMessages.map((m) => m.text ?? "").join("\n")) + imageTokensTotal + thinkingTokensTotal;
   const coveredIds = collectCoveredMessageIds(state);
   const sentTokens = estimateTokens(coreMessages, coveredIds, imageTokens) + systemPromptTokens;
   // View-based recount (issue #289): with active blocks the raw-view estimate
@@ -183,7 +184,7 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
     state: turn.state,
     nudge: turn.nudge,
     modelContextLimit: config.modelContextLimit,
-    unprunedTokens: coreMessages.reduce((sum, m) => sum + defaultCountTokens(m.text ?? "") + (imageTokens.get(m.id) ?? 0), 0),
+    unprunedTokens: coreMessages.reduce((sum, m) => sum + defaultCountTokens(m.text ?? "") + (m.thinkingTokens ?? 0) + (imageTokens.get(m.id) ?? 0), 0),
     cacheUsages: cacheUsageSamples(entries ?? []),
   });
 
