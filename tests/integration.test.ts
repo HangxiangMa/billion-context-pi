@@ -77,6 +77,61 @@ test("session_before_compact cancels Pi's auto-compaction", () => {
   assert.deepEqual(result, { cancel: true });
 });
 
+test("Breeze Sonnet 5 at 200K stays on ACP compression", () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension()(api as any);
+  const result = handlers.get("session_before_compact")![0]({}, {
+    model: { provider: "breeze", id: "claude-sonnet-5", contextWindow: 200_000 },
+  });
+  assert.deepEqual(result, { cancel: true });
+});
+
+test("Breeze-1M Sonnet 5 keeps Pi native auto-compaction", () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension()(api as any);
+  const result = handlers.get("session_before_compact")![0]({}, {
+    model: { provider: "breeze-1m", id: "claude-sonnet-5", contextWindow: 1_000_000 },
+    getContextUsage: () => ({ contextWindow: 200_000 }),
+  });
+  assert.equal(result, undefined, "active 1M model must not be blocked by stale 200K usage");
+});
+
+test("Sonnet 5 gate uses usage window when active model window is unavailable", () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension()(api as any);
+  const handler = handlers.get("session_before_compact")![0]!;
+  assert.equal(handler({}, {
+    model: { provider: "breeze-1m", id: "claude-sonnet-5" },
+    getContextUsage: () => ({ contextWindow: 1_000_000 }),
+  }), undefined);
+  assert.deepEqual(handler({}, {
+    model: { provider: "breeze-1m", id: "claude-sonnet-5", contextWindow: 999_999 },
+    getContextUsage: () => ({ contextWindow: 1_000_000 }),
+  }), { cancel: true }, "positive active model window wins over usage metadata");
+});
+
+test("all non-Breeze models remain ACP-owned until explicitly supported", () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension()(api as any);
+  const handler = handlers.get("session_before_compact")![0]!;
+  for (const model of [
+    { provider: "qgenie-openai", id: "gpt-5.6-luna", contextWindow: 200_000 },
+    { provider: "anthropic", id: "claude-sonnet-5", contextWindow: 1_000_000 },
+    { provider: "openai", id: "gpt-5", contextWindow: 1_000_000 },
+  ]) {
+    assert.deepEqual(handler({}, { model }), { cancel: true }, `${model.provider}/${model.id} stays ACP-owned`);
+  }
+});
+
+test("full Claude Sonnet 5 spelling uses same ACP gate", () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension()(api as any);
+  const result = handlers.get("session_before_compact")![0]({}, {
+    model: { provider: "breeze", id: "claude-sonnet-5", contextWindow: 200_000 },
+  });
+  assert.deepEqual(result, { cancel: true });
+});
+
 test("before_agent_start appends the ACP system prompt", () => {
   const { api, handlers } = captureApi();
   createAcpExtension()(api as any);
