@@ -370,10 +370,13 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   }
 
   function liveContextLimit(ctx: ExtensionContext): number {
-    const usage = ctx.getContextUsage?.();
-    if (usage?.contextWindow && usage.contextWindow > 0) return usage.contextWindow;
+    // Model metadata follows the active model across a model switch. The
+    // usage snapshot can retain the previous provider window until the next
+    // request, which otherwise makes compaction thresholds use a stale limit.
     const m = ctx.model as { contextWindow?: number } | undefined;
-    return m?.contextWindow ?? 0;
+    if (m?.contextWindow && m.contextWindow > 0) return m.contextWindow;
+    const usage = ctx.getContextUsage?.();
+    return usage?.contextWindow && usage.contextWindow > 0 ? usage.contextWindow : 0;
   }
 
   function configFor(ctx: ExtensionContext): Config {
