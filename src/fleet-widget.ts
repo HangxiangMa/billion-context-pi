@@ -3,12 +3,10 @@ import type { FleetRunView } from "./delegate-tool.js";
 import { getDelegateUsage } from "./delegate-tool.js";
 import { initFooterStatus, updateFooterStatus, disposeFooterStatus } from "./footer-status.js";
 
-const DELEGATE_WIDGET_KEY = "billion-context-pi-delegates";
-// Bridge channel so a host (pi-mine's task-dock) can render these runs in a
-// unified panel instead of this belowEditor widget. Payload: { runs: BridgeRun[] }.
+// Bridge channel; pi-mine's task-dock is the sole delegate UI owner.
+// Payload: { runs: BridgeRun[] }.
 const BRIDGE_CHANNEL = "billion-context-pi:delegate:v1";
 const REFRESH_MS = 500;
-const MAX_TASK_LEN = 48;
 
 interface WidgetRun {
   runId: string;
@@ -23,13 +21,8 @@ type FleetSnapshot = () => FleetRunView[];
 let ui: ExtensionContext["ui"] | undefined;
 let pi: ExtensionAPI | undefined;
 let timer: ReturnType<typeof setInterval> | undefined;
-let lastRenderKey = "";
 let runsSnapshot: RunsSnapshot | undefined;
 let fleetSnapshot: FleetSnapshot | undefined;
-
-function widgetSuppressed(): boolean {
-  return process.env.PI_ACP_DELEGATE_WIDGET_OFF === "1";
-}
 
 function emitBridge(): void {
   if (!pi?.events || !fleetSnapshot) return;
@@ -64,29 +57,6 @@ function emitBridge(): void {
   }
 }
 
-function truncateTask(task: string): string {
-  const oneLine = task.replace(/\n/g, " ").trim();
-  if (oneLine.length <= MAX_TASK_LEN) return oneLine;
-  return `${oneLine.slice(0, MAX_TASK_LEN - 1)}…`;
-}
-
-function renderLines(runs: WidgetRun[]): string[] | undefined {
-  if (runs.length === 0) return undefined;
-  const now = Date.now();
-  const header = runs.length === 1 ? `acp_delegate · 1 running` : `acp_delegate · ${runs.length} running`;
-  const rows = runs.map((r) => {
-    const elapsed = Math.max(0, Math.round((now - r.startedAt) / 1000));
-    return `  ● ${r.agent} (${elapsed}s) — ${truncateTask(r.task)}`;
-  });
-  return [header, ...rows, "  /acp-fleet · Ctrl+Alt+F — inspect"];
-}
-
-function renderKeyFor(runs: WidgetRun[]): string {
-  return runs
-    .map((r) => `${r.agent}:${Math.round((Date.now() - r.startedAt) / 1000)}:${truncateTask(r.task)}`)
-    .join("|");
-}
-
 function stopTimer(): void {
   if (timer) {
     clearInterval(timer);
@@ -94,69 +64,21 @@ function stopTimer(): void {
   }
 }
 
-function clearWidget(): void {
-  if (!ui) return;
-  try {
-    ui.setWidget(DELEGATE_WIDGET_KEY, undefined);
-  } catch {
-    // session is tearing down — best effort
-  }
-}
-
 function refresh(): void {
   if (!ui) return;
-  // Bridge fires every tick regardless of the widget-render debounce below —
-  // a host dock needs fresh elapsed-time even when our own renderKey hasn't
-  // changed at second resolution.
+  // Keep host task-dock rows and elapsed-time snapshots fresh.
   emitBridge();
   const runs = runsSnapshot ? runsSnapshot() : [];
-  if (runs.length === 0) {
-    // Empty list: clear the widget and stop the timer so an idle TUI does not
-    // tick forever. The next poke() (on a new spawn) restarts it.
-    if (lastRenderKey !== "") {
-      lastRenderKey = "";
-      if (!widgetSuppressed()) clearWidget();
-    }
-    // Final accumulated usage must still be shown after the last delegate
-    // finishes, so refresh the footer before stopping the timer.
-    updateFooterStatus();
-    stopTimer();
-    return;
-  }
-  const sorted = [...runs].sort((a, b) => a.startedAt - b.startedAt);
-  // Debounce: skip re-render if the visible state (agent + elapsed-second +
-  // count + task) hasn't changed since last render. Elapsed is rounded to
-  // seconds, so this naturally re-renders ~once per second per run.
-  const renderKey = renderKeyFor(sorted);
-  if (renderKey === lastRenderKey) return;
-  lastRenderKey = renderKey;
-  // PI_ACP_DELEGATE_WIDGET_OFF=1 lets a host (pi-mine's task-dock, via the
-  // bridge above) own delegate rows instead — this belowEditor panel would
-  // otherwise duplicate them.
-  if (!widgetSuppressed()) {
-    const lines = renderLines(sorted);
-    try {
-      ui.setWidget(DELEGATE_WIDGET_KEY, lines, { placement: "belowEditor" });
-    } catch {
-      // Real teardown goes through dispose() (session_shutdown). setWidget does
-      // not throw "stale" — if it ever throws here, best effort is to clear ui
-      // so the next setContext rebinds.
-      ui = undefined;
-      stopTimer();
-    }
-  }
-  // Delegates still running: keep the footer usage line fresh too (deduped
-  // inside updateFooterStatus, so this is O(1) per 500ms tick).
+  // pi-mine's task-dock owns all delegate rows. This extension only publishes
+  // the bridge snapshot and keeps legacy cumulative usage cleanup alive.
   updateFooterStatus();
+  if (runs.length === 0) stopTimer();
 }
 
 export const delegateStatusWidget = {
   setContext(ctx: ExtensionContext, snapshot: RunsSnapshot, extApi?: ExtensionAPI, fleet?: FleetSnapshot): void {
-    // Only the interactive TUI renders widgets. RPC mode has hasUI === true but
-    // its setWidget just emits extension_ui_request notifications to an RPC
-    // client — useless here and a needless ~1Hz chatter. print/json have
-    // hasUI === false. Guard on the mode directly (types.d.ts: "Use \"tui\" to
-    // guard terminal-only UI").
+    // Only interactive TUI sessions publish the bridge. RPC/print/json do not
+    // need a host task-dock update loop.
     if (ctx.mode !== "tui") return;
     initFooterStatus(ctx);
     ui = ctx.ui;
@@ -171,15 +93,13 @@ export const delegateStatusWidget = {
   },
   dispose(): void {
     stopTimer();
-    clearWidget();
     disposeFooterStatus();
     ui = undefined;
     pi = undefined;
-    lastRenderKey = "";
   },
   poke(): void {
     // A new spawn may arrive after refresh() stopped the timer on an empty
-    // list. Restart it so the widget updates.
+    // list. Restart bridge publication.
     if (ui && !timer) {
       timer = setInterval(refresh, REFRESH_MS);
       timer.unref?.();
