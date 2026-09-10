@@ -527,8 +527,10 @@
 
   思考项不透明且必须原样回传的 provider（如 OpenAI 加密 reasoning）可按 provider 退出：
   ```json
-  { "compress": { "providers": { "openai": { "reasoning": { "drop": false } } } } }
-  ```
+   { "compress": { "providers": { "openai": { "reasoning": { "drop": false } } } } }
+   ```
+
+   **严格回传的思考型上游（自动禁用）。** 少数思考模式 provider 在已闭合轮次的 assistant 消息丢失 reasoning 后，会以 HTTP 400（`The \`reasoning_content\` ... must be passed back to the API`）拒绝重放请求。适配器通过静态检测识别 **DeepSeek**——模型的 `baseUrl` 或 provider 名包含 `deepseek`（不区分大小写）——并对该模型自动强制 `drop: false`，即使显式配置了 `drop: true` 也会为安全起见覆盖。对非思考的 DeepSeek 模型零成本（它们不产生可丢弃的 `thinking` 部分）。**不在** `deepseek` 主机上的严格回传 provider——GLM-thinking、QwQ、自托管 DeepSeek 镜像——刻意不做自动检测（否则会禁用其非思考模型的该 pass），请对它们使用上面的按 provider 覆盖。配套修复：代理侧 billion-context#690、内核侧折叠原子性 acp-kernel#245（随 acp-kernel 0.0.63 发布）；跟踪于 [#361](https://github.com/ranxianglei/billion-context-pi/issues/361)。
 
 ### `compress.providers` —— 按 provider / 按 model 覆盖
 
