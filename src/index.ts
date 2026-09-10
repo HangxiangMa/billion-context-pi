@@ -177,9 +177,9 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     }
     if (standDownIfProxied(ctx)) return;
     runtime.store.invalidate();
-    runtime.clearNudgeTracking();
+    runtime.clearNudgeTracking(ctx.sessionManager.getSessionId());
     runtime.throttleFor(ctx.sessionManager.getSessionId()).reset();
-    runtime.clearCompressRetryTracking();
+    runtime.clearCompressRetryTracking(ctx.sessionManager.getSessionId());
     resetDelegateUsage();
     setDelegateDisplayUsage("separate");
     setDelegatePolicy(DEFAULT_DELEGATE_POLICY);
@@ -233,8 +233,11 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     delegateStatusWidget.setContext(ctx, runningRunsSnapshot);
   });
   pi.on("session_shutdown", (_event, ctx) => {
-    runtime.clearDeadCompress(ctx.sessionManager.getSessionId());
-    runtime.dropTokenScale(ctx.sessionManager.getSessionId());
+    const sid = ctx.sessionManager.getSessionId();
+    runtime.clearDeadCompress(sid);
+    runtime.dropTokenScale(sid);
+    runtime.clearNudgeTracking(sid);
+    runtime.clearCompressRetryTracking(sid);
     delegateStatusWidget.dispose();
     closeLogStream();
   });
@@ -353,7 +356,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
         state.nudge.lastNudgeShownTokens = 0;
         state.nudge.lastPerMessageNudgeTokens = 0;
         state.nudge.lastShownByTier = {};
-        runtime.clearNudgeTokenStamps();
+        runtime.clearNudgeTokenStamps(sid);
         logInfo("growth-scale", { sid, event: "scale-flip-reset", anchorStale: !hostFloorActive });
       }
       debug.event("context-in", {
@@ -474,7 +477,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     // the cap suppression sees the newest outcome (a success on this fire
     // must lift the cap on this same fire).
     const compressOutcomes = collectCompressOutcomes(entries, turnStartIndex(entries));
-    const outcome = compressOutcomes.length > 0 ? runtime.noteCompressOutcomes(turnKey, compressOutcomes) : null;
+    const outcome = compressOutcomes.length > 0 ? runtime.noteCompressOutcomes(sid, turnKey, compressOutcomes) : null;
 
     // Growth-aware re-inject bookkeeping (issue #269) runs on EVERY context
     // event, not only when the kernel wants to inject: the drop re-anchor
@@ -493,14 +496,14 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
             Math.max(config.nudge.growthFloor, Math.round(config.modelContextLimit * config.nudge.growthRatio)),
           );
     const reInjectFloor = Math.max(config.nudge.minGrowthFloor, config.nudge.minGrowthRatio * adaptiveGrowth);
-    let shownAt = runtime.nudgeShownTokensFor(turnKey);
+    let shownAt = runtime.nudgeShownTokensFor(sid, turnKey);
     if (shownAt !== undefined && tokenCount < shownAt - adaptiveGrowth) {
       // Mirror the kernel's drop re-anchor (nudgeNode): after a successful
       // compress the meter collapses; growth since the last shown must
       // restart from the new baseline, not from the old peak.
       logInfo("nudge", { sid: ctx.sessionManager.getSessionId(), event: "drop-reanchor", turnKey, from: shownAt, to: tokenCount });
       shownAt = tokenCount;
-      runtime.markNudgeShown(turnKey, tokenCount);
+      runtime.markNudgeShown(sid, turnKey, tokenCount);
     }
 
     if (turn.nudge?.shouldInject) {
@@ -538,9 +541,9 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       // keeps usage pinned at emergency). Once this turn burned
       // MAX_COMPRESS_ATTEMPTS attempts, stop re-injecting the nudge — the
       // kernel's emergency truncation still shrinks context mechanically.
-      const retryCapped = runtime.compressRetryCappedFor(turnKey);
+      const retryCapped = runtime.compressRetryCappedFor(sid, turnKey);
       const reInjectReady = shownAt === undefined || tokenCount - shownAt >= reInjectFloor;
-      const alreadyShown = retryCapped || (!emergency && runtime.nudgeShownFor(turnKey) && !reInjectReady);
+      const alreadyShown = retryCapped || (!emergency && runtime.nudgeShownFor(sid, turnKey) && !reInjectReady);
       if (!alreadyShown) {
         rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active), runtime.prompts));
         const rendered = renderNudgeText(turn.nudge, runtime.prompts);
@@ -552,7 +555,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
         if (debugOn && ctx.hasUI) {
           ctx.ui.notify(`[ACP nudge → context]${emergency ? " [EMERGENCY]" : ""}\n${rendered.text}${example}`);
         }
-        if (!emergency) runtime.markNudgeShown(turnKey, tokenCount);
+        if (!emergency) runtime.markNudgeShown(sid, turnKey, tokenCount);
         debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channels: ["context", debugOn ? "terminal" : null].filter(Boolean), emergency, turnKey, reInject: shownAt !== undefined, text: rendered.text + example });
       } else {
         debug.event("nudge-suppressed", { sid: ctx.sessionManager.getSessionId(), turnKey, reason: turn.nudge.reason, shownAt: shownAt ?? null, tokenCount, adaptiveGrowth, reInjectFloor });
