@@ -104,6 +104,7 @@ All keys below are currently **ACTIVE**.
 | `toolOutputMaxBytes` | number | `200000` | 🟢 ACTIVE | Hard byte cap on tool result text. |
 | `throttleRetry` | boolean \| object | `true` | 🟢 ACTIVE | Auto-retry provider token rate-limit errors with progressive backoff. |
 | `repetitionGuard` | boolean \| object | `true` | 🟢 ACTIVE | Break infinite loops of byte-identical tool calls (warn at 3 consecutive, block + abort at 5). |
+| `degenerationGuard` | boolean \| object | `true` | 🟢 ACTIVE | Collapse degenerate single-codepoint runs (e.g. 4655×「【」) in assistant text/thinking of the outgoing view and inject a one-shot recovery notice — breaks the abort loop where pi replays degenerated thinking back to the provider on every request (#351). |
 
 **Delegate keys**
 
@@ -136,6 +137,8 @@ All keys below are currently **ACTIVE**.
 | `repetitionGuard.enabled` | boolean | `true` | 🟢 ACTIVE | Enable the repetition breaker. `false` disables it entirely. |
 | `repetitionGuard.warn` | number | `3` | 🟢 ACTIVE | Consecutive byte-identical calls before a strong warning is appended to the tool result. |
 | `repetitionGuard.abort` | number | `5` | 🟢 ACTIVE | Consecutive byte-identical calls before the call is blocked (not executed) and the turn is aborted. Must exceed `warn`. |
+| `degenerationGuard.enabled` | boolean | `true` | 🟢 ACTIVE | Enable the degenerate-repeat guard. `false` disables it entirely. |
+| `degenerationGuard.minRun` | number | `200` | 🟢 ACTIVE | Minimum length of a single-codepoint run before it is treated as degeneration and collapsed. Values below 8 are raised to 8. |
 
 **Compression keys**
 
@@ -433,6 +436,52 @@ Any change to the arguments (or a switch to a different tool) resets the counter
 - **Default:** `5`
 - **Status:** 🟢 ACTIVE
 - **Description:** Number of consecutive byte-identical calls before the call is blocked and the turn is aborted. Must be greater than `warn`; if misconfigured lower, it is clamped up to `warn + 1`.
+
+---
+
+## Degeneration Guard
+
+The `degenerationGuard` key handles **character-level degeneration**: a model occasionally gets stuck repeating one single codepoint — observed in the wild as a thinking block ending in 4655 consecutive 「【」, escalating over turns until the turn aborts and the session dies (#351). Unlike `repetitionGuard` (byte-identical *tool-call* loops), this is a *token-level* attractor inside generated text/thinking itself.
+
+Why the adapter must act: pi **replays prior assistant thinking back to the provider on every subsequent request** (openai-completions sends it as `reasoning_content`, or as plain text when the model requires thinking-as-text), and an aborted turn's partial message persists in the session log. A degenerated tail therefore rides along on every later prompt, where the model sees its own previous output ending in thousands of repeated characters — a continuation bias that re-triggers the same degeneration, aborts the next turn too, and leaves the session with no recovery path.
+
+On every context event the guard scans assistant text/thinking blocks in the outgoing view:
+
+- Runs of one codepoint ≥ **`minRun`** are collapsed into a short marker (`【【【… [4655× identical chars cut — degenerate repeat]`) — up to 3 copies of the character are kept so the context stays legible. The pass is pure, idempotent and fail-safe; persisted history is never modified.
+- While the most recent assistant message is degenerated, a one-shot `[ACP recovery notice]` user message is appended telling the model that the repeated segment carries no information and to resume from its last valid step. It is position-based self-limiting: once the model produces a fresh turn the old message is no longer last and the notice disappears — no persistent state, no accumulation.
+- A terminal notification echoes the collapse once per session + run signature.
+
+Tool-call arguments are never rewritten (rewriting them would desync the model's view from the call that actually executed). Detection runs on the persisted originals, not the outgoing view: thinking-only aborted turns never reach the outgoing view (empty assistant text would 400 on OpenAI-compatible providers), yet they are still "the previous turn" for the model's continuation, so the notice fires there too.
+
+### `degenerationGuard`
+
+- **Type:** boolean \| object
+- **Default:** `true`
+- **Status:** 🟢 ACTIVE
+- **Description:** Enable/disable the degenerate-repeat guard and tune its threshold. `degenerationGuard: false` disables it entirely. Object form (any subset):
+
+  ```json
+  {
+    "degenerationGuard": {
+      "enabled": true,
+      "minRun": 200
+    }
+  }
+  ```
+
+### `degenerationGuard.enabled`
+
+- **Type:** boolean
+- **Default:** `true`
+- **Status:** 🟢 ACTIVE
+- **Description:** Turn the feature on/off. `false` (or top-level `degenerationGuard: false`) disables all degeneration detection and the recovery notice.
+
+### `degenerationGuard.minRun`
+
+- **Type:** number
+- **Default:** `200`
+- **Status:** 🟢 ACTIVE
+- **Description:** Minimum length of a single-codepoint run (counted in codepoints, surrogate-pair safe) before it is treated as degeneration. Legitimate runs in coding sessions (markdown hrules, dotted leaders) stay well below this; observed pre-degeneration drift maxed at ~60 before the catastrophic 4655 run. Values below 8 are raised to 8 (keeps the collapse marker itself re-scan safe); invalid values fall back to 200 with a logged warning.
 
 ---
 

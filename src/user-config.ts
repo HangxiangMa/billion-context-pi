@@ -3,7 +3,8 @@ import * as path from "node:path";
 import { homedir } from "node:os";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import type { Prompts } from "acp-kernel";
-import type { AdapterConfig, CompressConfig, DelegateConfig } from "./config.js";
+import type { AdapterConfig, CompressConfig, DelegateConfig, RepetitionGuardConfig } from "./config.js";
+import type { DegenerationGuardConfig } from "./degeneration.js";
 import type { ThrottleRetryConfig } from "./throttle-retry.js";
 import { debug, logWarn } from "./log.js";
 
@@ -21,6 +22,8 @@ export interface UserAcpConfig {
   compress?: CompressConfig;
   outputHeadroomMaxPct?: number | string;
   throttleRetry?: boolean | ThrottleRetryConfig;
+  repetitionGuard?: boolean | RepetitionGuardConfig;
+  degenerationGuard?: boolean | DegenerationGuardConfig;
   displayUsage?: "merged" | "separate";
   prompts?: Partial<Prompts>;
   acknowledgePromptsRisk?: boolean;
@@ -59,6 +62,7 @@ const KNOWN = new Set([
   "toolBashDefaultTimeout", "toolOutputMaxBytes",
   "delegate", "compress", "displayUsage", "throttleRetry",
   "outputHeadroomMaxPct",
+  "repetitionGuard", "degenerationGuard",
   "prompts", "acknowledgePromptsRisk",
 ]);
 

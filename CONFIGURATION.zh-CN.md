@@ -103,6 +103,7 @@
 | `toolOutputMaxBytes` | number | `200000` | 🟢 ACTIVE | 工具返回文本的硬性字节上限。 |
 | `throttleRetry` | boolean \| object | `true` | 🟢 ACTIVE | 自动重试 provider 侧 token 限流错误（递进退避）。 |
 | `repetitionGuard` | boolean \| object | `true` | 🟢 ACTIVE | 打断字节级完全相同的工具调用死循环（连续 3 次告警，连续 5 次拦截并中止本轮）。 |
+| `degenerationGuard` | boolean \| object | `true` | 🟢 ACTIVE | 折叠出站视图中 assistant text/thinking 里的单字符退化连击（如 4655×「【」）并注入一次性恢复通知——打破 pi 每轮请求都回传退化 thinking 导致的连环 abort 死循环（#351）。 |
 
 **delegate 键**
 
@@ -135,6 +136,8 @@
 | `repetitionGuard.enabled` | boolean | `true` | 🟢 ACTIVE | 启用重复熔断。`false` 完全关闭。 |
 | `repetitionGuard.warn` | number | `3` | 🟢 ACTIVE | 连续字节级相同调用达到该次数后，在工具返回尾部追加强警告。 |
 | `repetitionGuard.abort` | number | `5` | 🟢 ACTIVE | 连续字节级相同调用达到该次数后，拦截该调用（不执行）并中止本轮。必须大于 `warn`。 |
+| `degenerationGuard.enabled` | boolean | `true` | 🟢 ACTIVE | 启用单字符退化熔断。`false` 完全关闭。 |
+| `degenerationGuard.minRun` | number | `200` | 🟢 ACTIVE | 单 codepoint 连击达到该长度才判定为退化并折叠。小于 8 的值会被抬到 8。 |
 
 **compress 键**
 
@@ -425,6 +428,52 @@
 - **默认值：** `5`
 - **状态：** 🟢 ACTIVE
 - **说明：** 连续字节级相同调用达到该次数后，拦截该调用并中止本轮。必须大于 `warn`；若误配成更小值会被向上钳制到 `warn + 1`。
+
+---
+
+## 单字符退化熔断
+
+`degenerationGuard` 键处理**字符级退化**：模型偶发卡死在重复单个 codepoint 上——实测一例为 thinking 块末尾 4655 个连续「【」，跨轮升级直至 turn abort、会话停死（#351）。与 `repetitionGuard`（字节级相同的*工具调用*循环）不同，这是生成文本/thinking *内部*的 token 级吸引子。
+
+为什么必须由适配器出手：pi 会把历史 assistant thinking **在每个后续请求中回传给 provider**（openai-completions 以 `reasoning_content` 发送；模型要求 thinking-as-text 时转纯文本），而 aborted turn 的部分消息会持久化在会话日志里。于是退化尾部随每轮 prompt 重放：模型看到自己上一轮以数千个重复字符结尾 → 续写偏置再次触发同样的退化 → 下一轮也 abort → 会话陷入无恢复路径的 abort 死循环。
+
+每个 context 事件中，该熔断器扫描出站视图里的 assistant text/thinking 块：
+
+- 长度 ≥ **`minRun`** 的单 codepoint 连击被折叠成短标记（`【【【… [4655× identical chars cut — degenerate repeat]`）——最多保留 3 份字符样本以保持上下文可读。该过程是纯函数、幂等、fail-safe 的；持久化历史从不修改。
+- 当最近一条 assistant 消息已退化时，追加一次性 `[ACP recovery notice]` 用户消息，告知模型重复段不携带信息、应从最后有效步骤继续。基于位置的自限机制：模型产出新 turn 后旧消息不再是最末一条，通知自动消失——无持久状态、不会累积。
+- 终端通知按「会话 + 连击特征」去重，每次只弹一次。
+
+工具调用参数从不改写（改写会使模型视图与实际执行的调用脱钩）。检测基于持久化 originals 而非出站视图：thinking-only 的 aborted turn 根本不会进入出站视图（空 assistant 文本在 OpenAI 兼容 provider 上会 400），但它仍是模型续写意义上的"上一轮"，通知必须照发。
+
+### `degenerationGuard`
+
+- **类型：** boolean \| object
+- **默认值：** `true`
+- **状态：** 🟢 ACTIVE
+- **说明：** 启用/禁用单字符退化熔断并调整阈值。`degenerationGuard: false` 完全关闭。object 形式（任意子集）：
+
+  ```json
+  {
+    "degenerationGuard": {
+      "enabled": true,
+      "minRun": 200
+    }
+  }
+  ```
+
+### `degenerationGuard.enabled`
+
+- **类型：** boolean
+- **默认值：** `true`
+- **状态：** 🟢 ACTIVE
+- **说明：** 开关。`false`（或顶层 `degenerationGuard: false`）禁用所有退化检测与恢复通知。
+
+### `degenerationGuard.minRun`
+
+- **类型：** number
+- **默认值：** `200`
+- **状态：** 🟢 ACTIVE
+- **说明：** 单 codepoint 连击（按 codepoint 计数，代理对安全）达到该长度才判定为退化。编码会话中的合法连击（markdown 分隔线、点线引导符）远低于此值；实测退化前漂移最大约 60，随后才是 4655 的灾难性连击。小于 8 的值会被抬到 8（保证折叠标记自身不会被二次扫描命中）；非法值回退 200 并记日志警告。
 
 ---
 
