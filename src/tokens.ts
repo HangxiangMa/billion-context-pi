@@ -40,6 +40,7 @@ export function estimateTokens(messages: CoreMessage[], coveredIds?: Set<string>
     if (m.toolName === "compress") continue;
     if (coveredIds?.has(m.id)) continue;
     tokens += defaultCountTokens(m.text ?? "");
+    tokens += m.thinkingTokens ?? 0;
     const img = imageTokensById?.get(m.id);
     if (img) tokens += img;
   }

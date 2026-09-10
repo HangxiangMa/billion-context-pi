@@ -49,7 +49,8 @@ Create `~/.pi/acp.json` (or `<project>/.pi/acp.json`) and drop in whichever keys
   "compress": {
     "maxContextLimit": "75%",
     "emergencyThresholdPercent": "95%",
-    "nudgeGrowthTokens": 50000
+    "nudgeGrowthTokens": 50000,
+    "reasoning": { "drop": true, "threshold": 2048 }
   }
 }
 ```
@@ -103,6 +104,7 @@ All keys below are currently **ACTIVE**.
 | `toolOutputMaxBytes` | number | `200000` | 🟢 ACTIVE | Hard byte cap on tool result text. |
 | `throttleRetry` | boolean \| object | `true` | 🟢 ACTIVE | Auto-retry provider token rate-limit errors with progressive backoff. |
 | `repetitionGuard` | boolean \| object | `true` | 🟢 ACTIVE | Break infinite loops of byte-identical tool calls (warn at 3 consecutive, block + abort at 5). |
+| `degenerationGuard` | boolean \| object | `true` | 🟢 ACTIVE | Collapse degenerate single-codepoint runs (e.g. 4655×「【」) in assistant text/thinking of the outgoing view and inject a one-shot recovery notice — breaks the abort loop where pi replays degenerated thinking back to the provider on every request (#351). |
 
 **Delegate keys**
 
@@ -135,6 +137,8 @@ All keys below are currently **ACTIVE**.
 | `repetitionGuard.enabled` | boolean | `true` | 🟢 ACTIVE | Enable the repetition breaker. `false` disables it entirely. |
 | `repetitionGuard.warn` | number | `3` | 🟢 ACTIVE | Consecutive byte-identical calls before a strong warning is appended to the tool result. |
 | `repetitionGuard.abort` | number | `5` | 🟢 ACTIVE | Consecutive byte-identical calls before the call is blocked (not executed) and the turn is aborted. Must exceed `warn`. |
+| `degenerationGuard.enabled` | boolean | `true` | 🟢 ACTIVE | Enable the degenerate-repeat guard. `false` disables it entirely. |
+| `degenerationGuard.minRun` | number | `200` | 🟢 ACTIVE | Minimum length of a single-codepoint run before it is treated as degeneration and collapsed. Values below 8 are raised to 8. |
 
 **Compression keys**
 
@@ -143,6 +147,7 @@ All keys below are currently **ACTIVE**.
 | `compress.maxContextLimit` | number \| string | `"75%"` | 🟢 ACTIVE | Context threshold that triggers forced compression nudges. |
 | `compress.emergencyThresholdPercent` | number \| string | `"95%"` | 🟢 ACTIVE | Context threshold that triggers emergency truncation. |
 | `compress.nudgeGrowthTokens` | number | `50000` | 🟢 ACTIVE | Token growth step for soft compression nudges. |
+| `compress.reasoning` | object | `{ "drop": true, "threshold": 2048 }` | 🟢 ACTIVE | Drop oversized thinking from historical `compress` calls (request-time; persisted history untouched). |
 
 **Prompts keys**
 
@@ -434,6 +439,52 @@ Any change to the arguments (or a switch to a different tool) resets the counter
 
 ---
 
+## Degeneration Guard
+
+The `degenerationGuard` key handles **character-level degeneration**: a model occasionally gets stuck repeating one single codepoint — observed in the wild as a thinking block ending in 4655 consecutive 「【」, escalating over turns until the turn aborts and the session dies (#351). Unlike `repetitionGuard` (byte-identical *tool-call* loops), this is a *token-level* attractor inside generated text/thinking itself.
+
+Why the adapter must act: pi **replays prior assistant thinking back to the provider on every subsequent request** (openai-completions sends it as `reasoning_content`, or as plain text when the model requires thinking-as-text), and an aborted turn's partial message persists in the session log. A degenerated tail therefore rides along on every later prompt, where the model sees its own previous output ending in thousands of repeated characters — a continuation bias that re-triggers the same degeneration, aborts the next turn too, and leaves the session with no recovery path.
+
+On every context event the guard scans assistant text/thinking blocks in the outgoing view:
+
+- Runs of one codepoint ≥ **`minRun`** are collapsed into a short marker (`【【【… [4655× identical chars cut — degenerate repeat]`) — up to 3 copies of the character are kept so the context stays legible. The pass is pure, idempotent and fail-safe; persisted history is never modified.
+- While the most recent assistant message is degenerated, a one-shot `[ACP recovery notice]` user message is appended telling the model that the repeated segment carries no information and to resume from its last valid step. It is position-based self-limiting: once the model produces a fresh turn the old message is no longer last and the notice disappears — no persistent state, no accumulation.
+- A terminal notification echoes the collapse once per session + run signature.
+
+Tool-call arguments are never rewritten (rewriting them would desync the model's view from the call that actually executed). Detection runs on the persisted originals, not the outgoing view: thinking-only aborted turns never reach the outgoing view (empty assistant text would 400 on OpenAI-compatible providers), yet they are still "the previous turn" for the model's continuation, so the notice fires there too.
+
+### `degenerationGuard`
+
+- **Type:** boolean \| object
+- **Default:** `true`
+- **Status:** 🟢 ACTIVE
+- **Description:** Enable/disable the degenerate-repeat guard and tune its threshold. `degenerationGuard: false` disables it entirely. Object form (any subset):
+
+  ```json
+  {
+    "degenerationGuard": {
+      "enabled": true,
+      "minRun": 200
+    }
+  }
+  ```
+
+### `degenerationGuard.enabled`
+
+- **Type:** boolean
+- **Default:** `true`
+- **Status:** 🟢 ACTIVE
+- **Description:** Turn the feature on/off. `false` (or top-level `degenerationGuard: false`) disables all degeneration detection and the recovery notice.
+
+### `degenerationGuard.minRun`
+
+- **Type:** number
+- **Default:** `200`
+- **Status:** 🟢 ACTIVE
+- **Description:** Minimum length of a single-codepoint run (counted in codepoints, surrogate-pair safe) before it is treated as degeneration. Legitimate runs in coding sessions (markdown hrules, dotted leaders) stay well below this; observed pre-degeneration drift maxed at ~60 before the catastrophic 4655 run. Values below 8 are raised to 8 (keeps the collapse marker itself re-scan safe); invalid values fall back to 200 with a logged warning.
+
+---
+
 ## Compression Tuning
 
 The `compress` sub-object groups the three thresholds that form a **three-tier escalation** for context management. They control *when* the model is nudged to compress and *when* large outputs are forcibly truncated to keep the session alive. Lower thresholds mean the extension compresses earlier and more aggressively.
@@ -465,6 +516,26 @@ The flow is:
 - **Status:** 🟢 ACTIVE
 - **Description:** The token-growth threshold that controls the cadence of **soft** compression nudges. A soft nudge fires roughly every time this many tokens of new compressible content accumulate. A lower value means the model is nudged to compress more often; a higher value means less frequent nudges. This only governs *growth-driven* nudges — once usage crosses `compress.maxContextLimit`, forced nudges take over regardless of this setting. Maps to the kernel settings `nudge.growthFloor` and `nudge.growthCap`.
 - **Same-turn re-inject:** within one user turn a nudge injects at most once, but once the context has since grown by a full growth floor (mirroring the kernel's anti-thrashing cadence: `max(minGrowthFloor, minGrowthRatio × adaptiveGrowth)` — 22.5K tokens with defaults) a fresh reminder re-injects in the same turn (issue #269: a model that ignored a 78% nudge used to stay silent until the 95% emergency truncation). After a successful compress the growth baseline re-anchors to the new (smaller) scale, so post-compress regrowth into the pressure band is not held against the pre-compress peak.
+
+### `compress.reasoning`
+
+- **Type:** `object` — `{ "drop": boolean, "threshold": number }`
+- **Default:** `{ "drop": true, "threshold": 2048 }`
+- **Status:** 🟢 ACTIVE
+- **Description:** Config for dropping oversized reasoning (thinking) parts from historical `compress` tool calls — exact semantic alignment with [opencode-acp #377](https://github.com/ranxianglei/opencode-acp/pull/377). `compress` calls are hard-exempt from compression (their tool results anchor the block summaries), so their thinking rides along every request as an unreclaimable context floor. A request-time pass removes `thinking` parts from a message only when **all** gates hold:
+  1. **Closed turn** — the message is strictly before the last genuine user message; the active round is never touched (some providers require replaying the active round's thinking).
+  2. **Selector** — the message carries a `toolCall` part with name `compress` (only compress; other protected tools would need their own explicit config).
+  3. **Size** — the message's total reasoning length (chars, summed across parts of that message, never across messages) **strictly exceeds** `threshold`. `0` drops any non-empty reasoning.
+
+  Persisted history is never modified — the pass only rewrites the outgoing view, rebuilt fresh from the session log on every request. Pure, idempotent, fail-safe (any error leaves messages untouched). Merged field-wise (`drop`, `threshold` separately) across the three levels of `compress.providers`.
+
+  Fields:
+  - `drop` (`boolean`, default `true`) — master switch; `false` disables the pass (kill-switch).
+  - `threshold` (`number`, chars, default `2048`) — single-thinking size gate.
+
+  Providers whose thinking items are opaque and must round-trip unmodified (e.g. OpenAI encrypted reasoning) can opt out per-provider:\n  ```json
+  { "compress": { "providers": { "openai": { "reasoning": { "drop": false } } } } }
+  ```
 
 ### `compress.providers` — per-provider & per-model overrides
 

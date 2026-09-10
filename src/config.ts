@@ -1,4 +1,6 @@
 import { defaultConfig, type Config, type Prompts } from "acp-kernel";
+import type { CompressReasoningConfig } from "./reasoning-drop.js";
+import type { DegenerationGuardConfig } from "./degeneration.js";
 import type { ThrottleRetryConfig } from "./throttle-retry.js";
 import { logWarn } from "./log.js";
 
@@ -129,6 +131,10 @@ export interface CompressSettings {
    *  window and would suppress every nudge. Maps to kernel
    *  nudge.minPressureBenefitTokens. */
   minPressureBenefitTokens?: number;
+  /** [#336] Drop oversized reasoning (thinking) from historical `compress`
+   *  tool calls — see CompressReasoningConfig in src/reasoning-drop.ts.
+   *  Merged field-wise (drop, threshold) across the three levels. */
+  reasoning?: CompressReasoningConfig;
 }
 
 /** Per-provider compression overrides. Carries the same tuning fields as the
@@ -236,6 +242,15 @@ export interface AdapterConfig {
    *  warn=3, abort=5. Stops greedy small models looping on byte-identical
    *  tool calls (issue #308). */
   repetitionGuard?: boolean | RepetitionGuardConfig;
+  /** Character-level degenerate-repeat guard (see DegenerationGuardConfig).
+   *  Collapses long single-codepoint runs (e.g. 4655×「【」) in assistant
+   *  text/thinking of the outgoing view and injects a one-shot recovery notice
+   *  after a degenerated turn — breaking the abort loop where pi replays the
+   *  degenerated thinking back to the provider on every request (issue #351).
+   *  Distinct from `repetitionGuard`, which is tool-call level. Accepts a
+   *  boolean shorthand (`false` disables) or an object. Default: enabled,
+   *  minRun=200. */
+  degenerationGuard?: boolean | DegenerationGuardConfig;
   /** Legacy flat alias for `delegate.displayUsage`. Kept for backward
    *  compatibility with existing acp.json files. Prefer `delegate.displayUsage`. */
   displayUsage?: "merged" | "separate";
@@ -364,6 +379,10 @@ export function mergeCompress(
     emergencyThresholdPercent: model?.emergencyThresholdPercent ?? provider?.emergencyThresholdPercent ?? global?.emergencyThresholdPercent,
     nudgeGrowthTokens: model?.nudgeGrowthTokens ?? provider?.nudgeGrowthTokens ?? global?.nudgeGrowthTokens,
     minPressureBenefitTokens: model?.minPressureBenefitTokens ?? provider?.minPressureBenefitTokens ?? global?.minPressureBenefitTokens,
+    reasoning: {
+      drop: model?.reasoning?.drop ?? provider?.reasoning?.drop ?? global?.reasoning?.drop,
+      threshold: model?.reasoning?.threshold ?? provider?.reasoning?.threshold ?? global?.reasoning?.threshold,
+    },
   };
 }
 
