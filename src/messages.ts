@@ -1,5 +1,5 @@
 import type { SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
-import type { CoreMessage } from "acp-kernel";
+import { defaultCountTokens, type CoreMessage } from "acp-kernel";
 import { rewriteTagTokens } from "./tag-tokens.js";
 
 type AgentMessage = SessionMessageEntry["message"];
@@ -59,6 +59,11 @@ function projectMessage(message: AgentMessage, id: string): CoreMessage[] {
     }];
   }
   if (role === "assistant") {
+    // Thinking rides in every request but never into the text projection — meter
+    // it via CoreMessage.thinkingTokens (issue #353). Kernel contract: attach to
+    // exactly one core per turn — the first emitted one.
+    const thinking = thinkingTokenCount(msg.content);
+    const thinkingField = thinking > 0 ? { thinkingTokens: thinking } : {};
     const calls = allToolCalls(msg.content);
     if (calls.length > 0) {
       const textParts = extractText(msg.content);
@@ -66,9 +71,9 @@ function projectMessage(message: AgentMessage, id: string): CoreMessage[] {
         const call = calls[0]!;
         const argStr = stringifyArgs(call.arguments);
         const text = argStr && textParts ? `${textParts}\n${argStr}` : argStr || textParts;
-        return [{ id, role: "assistant", contentType: "tool-call", toolName: call.name, toolCallId: call.id, text }];
+        return [{ id, role: "assistant", contentType: "tool-call", toolName: call.name, toolCallId: call.id, text, ...thinkingField }];
       }
-      return calls.map((call) => {
+      return calls.map((call, i) => {
         const argStr = stringifyArgs(call.arguments);
         return {
           id: `${id}#${call.id}`,
@@ -77,6 +82,7 @@ function projectMessage(message: AgentMessage, id: string): CoreMessage[] {
           toolName: call.name,
           toolCallId: call.id,
           text: argStr || textParts,
+          ...(i === 0 ? thinkingField : {}),
         };
       });
     }
@@ -84,7 +90,7 @@ function projectMessage(message: AgentMessage, id: string): CoreMessage[] {
     // Drop thinking-only turns: empty assistant text makes OpenAI-compatible
     // providers (e.g. GLM) return 400 (no body), which Pi misreads as overflow.
     if (!text.trim()) return [];
-    return [{ id, role: "assistant", contentType: "text", text }];
+    return [{ id, role: "assistant", contentType: "text", text, ...thinkingField }];
   }
   const customText = extractText(msg.content) || fallbackText(msg);
   return customText.length > 0
@@ -117,6 +123,18 @@ export function extractText(content: unknown): string {
     if (b.type === "text" && typeof b.text === "string") parts.push(stripRefTag(b.text));
   }
   return parts.join("\n");
+}
+
+// Thinking blocks are invisible to extractText but resent with every request —
+// measure their volume so kernel counting sees the full payload (issue #353).
+export function thinkingTokenCount(content: unknown): number {
+  if (!Array.isArray(content)) return 0;
+  const parts: string[] = [];
+  for (const block of content) {
+    const b = block as { type?: string; thinking?: string };
+    if (b.type === "thinking" && typeof b.thinking === "string") parts.push(b.thinking);
+  }
+  return parts.length > 0 ? defaultCountTokens(parts.join("\n")) : 0;
 }
 
 function stripRefTag(text: string): string {
