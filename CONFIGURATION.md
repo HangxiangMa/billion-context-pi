@@ -533,7 +533,8 @@ The flow is:
   - `drop` (`boolean`, default `true`) — master switch; `false` disables the pass (kill-switch).
   - `threshold` (`number`, chars, default `2048`) — single-thinking size gate.
 
-  Providers whose thinking items are opaque and must round-trip unmodified (e.g. OpenAI encrypted reasoning) can opt out per-provider:\n  ```json
+  Providers whose thinking items are opaque and must round-trip unmodified (e.g. OpenAI encrypted reasoning) can opt out per-provider:
+   ```json
    { "compress": { "providers": { "openai": { "reasoning": { "drop": false } } } } }
    ```
 
