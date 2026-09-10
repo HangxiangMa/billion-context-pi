@@ -1,24 +1,22 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-/** Breeze exposes Sonnet 5 under both `sonnet5` and Claude's full spelling. */
-export function isSonnet5Model(model: { provider?: string; id?: string } | undefined): boolean {
-  if (!model) return false;
-  const provider = model.provider?.toLowerCase() ?? "";
-  const id = model.id?.toLowerCase() ?? "";
-  if (provider !== "breeze" && provider !== "breeze-1m") return false;
-  return id === "sonnet5" || id === "claude-sonnet-5" || /(^|[-_/])sonnet[-_]?5($|[-_/\[])/.test(id);
+/** Match Breeze and future suffixed Breeze provider variants (for example `breeze-1m`). */
+export function isBreezeModel(model: { provider?: string } | undefined): boolean {
+  const provider = model?.provider?.toLowerCase() ?? "";
+  return /^breeze(?:[-_].+)?$/.test(provider);
 }
 
 /**
  * Return whether ACP should own native Pi compaction for this active model.
  *
- * Breeze's 200K Sonnet 5 endpoint needs ACP's reference-aware compression.
- * Breeze's 1M Sonnet 5 endpoint has enough room for Pi's native compaction;
- * cancelling it leaves that endpoint with no usable automatic compaction path.
+ * Breeze model providers encode endpoint variants in their provider name, but
+ * model catalogs can change. Use the active context window instead of a model
+ * allowlist: sub-1M Breeze endpoints use ACP's reference-aware compression,
+ * while 1M+ endpoints retain Pi's native compaction.
  */
 export function shouldAcpOwnCompaction(ctx: Pick<ExtensionContext, "model" | "getContextUsage"> | undefined): boolean {
-  const model = ctx?.model as { provider?: string; id?: string; contextWindow?: number } | undefined;
-  if (!isSonnet5Model(model)) return true;
+  const model = ctx?.model as { provider?: string; contextWindow?: number } | undefined;
+  if (!isBreezeModel(model)) return true;
 
   const modelWindow = model?.contextWindow;
   const usageWindow = ctx?.getContextUsage?.()?.contextWindow;

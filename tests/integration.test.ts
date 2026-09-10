@@ -110,7 +110,7 @@ test("Sonnet 5 gate uses usage window when active model window is unavailable", 
   }), { cancel: true }, "positive active model window wins over usage metadata");
 });
 
-test("all non-Breeze models remain ACP-owned until explicitly supported", () => {
+test("all non-Breeze models remain ACP-owned", () => {
   const { api, handlers } = captureApi();
   createAcpExtension()(api as any);
   const handler = handlers.get("session_before_compact")![0]!;
@@ -120,6 +120,20 @@ test("all non-Breeze models remain ACP-owned until explicitly supported", () => 
     { provider: "openai", id: "gpt-5", contextWindow: 1_000_000 },
   ]) {
     assert.deepEqual(handler({}, { model }), { cancel: true }, `${model.provider}/${model.id} stays ACP-owned`);
+  }
+});
+
+test("all Breeze provider variants use context-window gating", () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension()(api as any);
+  const handler = handlers.get("session_before_compact")![0]!;
+  for (const provider of ["breeze-2m", "breeze_custom", "BREEZE-1M"]) {
+    assert.equal(handler({}, {
+      model: { provider, contextWindow: 1_000_000 },
+    }), undefined, `${provider} keeps native compaction at 1M`);
+    assert.deepEqual(handler({}, {
+      model: { provider, contextWindow: 200_000 },
+    }), { cancel: true }, `${provider} uses ACP compression below 1M`);
   }
 });
 
