@@ -41,6 +41,7 @@ import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
 import { applyOutputHeadroom, inspectOverflowMessage, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
 import { isOmpHost, OMP_UNSUPPORTED_MESSAGE } from "./omp.js";
 import { isBiliProxyBaseUrl, PROXY_STAND_DOWN_MESSAGE } from "./proxy-detect.js";
+import { shouldAcpOwnCompaction } from "./compaction-gate.js";
 
 type AgentMessage = SessionMessageEntry["message"];
 
@@ -125,8 +126,8 @@ function userConfigDisabled(cwd: string): boolean {
 // opencode-acp requiring opencode's compaction.auto = false). On a refused host
 // (OMP) we stand down and let the host compact normally instead.
 function wireCompactionDisable(pi: ExtensionAPI, runtime: AcpRuntime): void {
-  pi.on("session_before_compact", () => {
-    if (runtime.refused) return;
+  pi.on("session_before_compact", (_event, ctx) => {
+    if (runtime.refused || !shouldAcpOwnCompaction(ctx)) return;
     return { cancel: true };
   });
 }
