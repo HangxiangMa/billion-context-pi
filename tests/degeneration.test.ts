@@ -88,6 +88,25 @@ test("find: empty input / minRun < 2 → no runs", () => {
   assert.deepEqual(findDegenerateRuns("x".repeat(500), Number.NaN), []);
 });
 
+test("pre-screen: large clean block takes the fast path and stays clean", () => {
+  const s = "abcdefghij".repeat(20_000); // 200k chars, longest run = 1
+  assert.deepEqual(findDegenerateRuns(s, 200), []);
+  assert.equal(collapseDegenerateRuns(s, 200), s, "clean input returned unchanged");
+});
+
+test("pre-screen: sub-threshold runs scattered through a large block stay undetected", () => {
+  let s = "";
+  for (let i = 0; i < 500; i++) s += "a".repeat(199) + String.fromCharCode(66 + (i % 25)); // B..Z filler, never 'a'
+  assert.equal(s.length, 500 * 200);
+  assert.deepEqual(findDegenerateRuns(s, 200), [], "199-runs miss both the pre-screen and the scan");
+});
+
+test("pre-screen: astral and line-terminator runs still detected through the fast path", () => {
+  assert.equal(findDegenerateRuns("🚀".repeat(250), 200).length, 1, "/u keeps surrogate pairs whole");
+  assert.equal(findDegenerateRuns("\n".repeat(300), 200).length, 1, "/s matches line terminators");
+  assert.equal(findDegenerateRuns("\u0000".repeat(200), 200).length, 1, "/s matches NUL");
+});
+
 // ---------- collapseDegenerateRuns ----------
 
 test("collapse: no-op returns input unchanged when clean", () => {

@@ -75,6 +75,26 @@ export interface DegenerateRun {
   index: number;
 }
 
+// Pre-screen before the full codepoint scan: one compiled regex pass with no
+// allocation decides whether a block can hold a degenerate run at all, so the
+// Array.from scan (one string object per codepoint) only runs on the rare
+// dirty block. Equivalent to the scan, not an approximation: with /s/u, `.`
+// matches EVERY codepoint (line terminators and isolated surrogates included),
+// so no run the scan would find can go unmatched, and a match is by
+// construction a run of >= minRun identical codepoints (no false positives).
+// Memoized per threshold — recompiling per block would eat the savings.
+let preScreenMinRun = Number.NaN;
+let preScreenRe: RegExp | null = null;
+
+function hasLongRun(text: string, minRun: number): boolean {
+  const n = Math.floor(minRun);
+  if (preScreenRe === null || preScreenMinRun !== n) {
+    preScreenMinRun = n;
+    preScreenRe = new RegExp(`(.)\\1{${Math.max(n - 1, 0)},}`, "su");
+  }
+  return preScreenRe.test(text);
+}
+
 /** Find maximal runs of a single repeated codepoint with length >= minRun.
  *  Codepoint-safe: surrogate pairs count as one unit, so a run of astral
  *  characters is detected like any other. Returns [] for empty input or
@@ -82,6 +102,7 @@ export interface DegenerateRun {
 export function findDegenerateRuns(text: string, minRun: number): DegenerateRun[] {
   const runs: DegenerateRun[] = [];
   if (!text || !Number.isFinite(minRun) || minRun < 2) return runs;
+  if (!hasLongRun(text, minRun)) return runs;
   const chars = Array.from(text);
   let utf16 = 0;
   let k = 0;
