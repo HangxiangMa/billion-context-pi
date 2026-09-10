@@ -123,17 +123,17 @@ test("all non-Breeze models remain ACP-owned", () => {
   }
 });
 
-test("all Breeze provider variants use context-window gating", () => {
+test("all Breeze Claude model IDs use context-window gating", () => {
   const { api, handlers } = captureApi();
   createAcpExtension()(api as any);
   const handler = handlers.get("session_before_compact")![0]!;
-  for (const provider of ["breeze-2m", "breeze_custom", "BREEZE-1M"]) {
-    assert.equal(handler({}, {
-      model: { provider, contextWindow: 1_000_000 },
-    }), undefined, `${provider} keeps native compaction at 1M`);
+  for (const id of ["claude-opus-4", "claude-haiku-4", "claude-3-7-sonnet"]) {
     assert.deepEqual(handler({}, {
-      model: { provider, contextWindow: 200_000 },
-    }), { cancel: true }, `${provider} uses ACP compression below 1M`);
+      model: { provider: "breeze", id, contextWindow: 200_000 },
+    }), { cancel: true }, `${id} uses ACP compression on 200K Breeze`);
+    assert.equal(handler({}, {
+      model: { provider: "breeze-1m", id, contextWindow: 1_000_000 },
+    }), undefined, `${id} keeps native compaction on 1M Breeze`);
   }
 });
 
