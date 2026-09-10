@@ -1,16 +1,16 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-/** Match Breeze and future suffixed Breeze provider variants (for example `breeze-1m`). */
+/** Match currently supported Breeze endpoints. Model IDs are intentionally not allowlisted. */
 export function isBreezeModel(model: { provider?: string } | undefined): boolean {
   const provider = model?.provider?.toLowerCase() ?? "";
-  return /^breeze(?:[-_].+)?$/.test(provider);
+  return provider === "breeze" || provider === "breeze-1m";
 }
 
 /**
  * Return whether ACP should own native Pi compaction for this active model.
  *
- * Breeze model providers encode endpoint variants in their provider name, but
- * model catalogs can change. Use the active context window instead of a model
+ * Breeze providers encode endpoint variants in their provider name, but model
+ * catalogs can change. Use the active context window instead of a model ID
  * allowlist: sub-1M Breeze endpoints use ACP's reference-aware compression,
  * while 1M+ endpoints retain Pi's native compaction.
  */
