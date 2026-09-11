@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionCommandContext, RegisteredCommand, SessionEntry } from "@earendil-works/pi-coding-agent";
 import * as path from "node:path";
 import type { AcpRuntime } from "./runtime.js";
-import { ACP_STATUS_CUSTOM_TYPE, ACP_EXPORT_CUSTOM_TYPE } from "./turn-boundary.js";
+import { ACP_STATUS_CUSTOM_TYPE, ACP_EXPORT_CUSTOM_TYPE } from "./messages.js";
 import { exportSession, parseExportArgs } from "./export.js";
 import { defaultCountTokens, parseBlockIdArg, collectBlockContent } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";

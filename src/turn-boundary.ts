@@ -9,19 +9,7 @@
  * Every turn-boundary check in the adapter goes through isTurnBoundary.
  */
 
-/** Host-injected status panel custom messages (src/commands.ts) — UI-only,
- *  never projected into LLM context, so they never count as user-like entries. */
-export const ACP_STATUS_CUSTOM_TYPE = "acp-status";
-
-/** /acp-export handoff docs (src/export.ts) — UI-only transcript output,
- *  persistent in the session but never projected into LLM context (#255). */
-export const ACP_EXPORT_CUSTOM_TYPE = "acp-export";
-
-/** Custom-message types excluded from LLM-context projection (#255, #380):
- *  UI-only panels/docs that persist in the session but must not reach the
- *  model. Shared by the context projection (src/messages.ts) and the
- *  turn-boundary predicate below so the two views can never drift apart. */
-const CONTEXT_EXCLUDED_CUSTOM_TYPES = new Set<string>([ACP_STATUS_CUSTOM_TYPE, ACP_EXPORT_CUSTOM_TYPE]);
+import { isCustomMessageEntry } from "./messages.js";
 
 /** Minimal structural shape of a session-log entry for boundary checks. Pi's
  *  SessionEntry and the narrower arrays used by token accounting both satisfy
@@ -41,16 +29,6 @@ export interface TurnBoundaryEntry {
  *  standalone pi users' nudge cadence unchanged. */
 export interface TurnBoundaryPolicy {
   countCustomMessages?: boolean;
-}
-
-/** True for host-injected custom_message entries that participate in LLM
- *  context — every custom_message except the UI-only types in
- *  CONTEXT_EXCLUDED_CUSTOM_TYPES (acp-status panels, acp-export docs). Type
- *  guard so callers keep narrowing the session-entry union (shared by the
- *  context projection in src/messages.ts and the policy-aware boundary check
- *  below so the two can never drift apart). */
-export function isCustomMessageEntry(entry: TurnBoundaryEntry): entry is TurnBoundaryEntry & { type: "custom_message" } {
-  return entry.type === "custom_message" && !CONTEXT_EXCLUDED_CUSTOM_TYPES.has(entry.customType);
 }
 
 /** The ONE turn-boundary predicate (#364): does this entry start a new turn?
