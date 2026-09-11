@@ -242,23 +242,23 @@ export interface AdapterConfig {
    *  warn=3, abort=5. Stops greedy small models looping on byte-identical
    *  tool calls (issue #308). */
   repetitionGuard?: boolean | RepetitionGuardConfig;
-   /** Character-level degenerate-repeat guard (see DegenerationGuardConfig).
-    *  Collapses long single-codepoint runs (e.g. 4655×「【」) in assistant
-    *  text/thinking of the outgoing view and injects a one-shot recovery notice
-    *  after a degenerated turn — breaking the abort loop where pi replays the
-    *  degenerated thinking back to the provider on every request (issue #351).
-    *  Distinct from `repetitionGuard`, which is tool-call level. Accepts a
-    *  boolean shorthand (`false` disables) or an object. Default: enabled,
-    *  minRun=200. */
-   degenerationGuard?: boolean | DegenerationGuardConfig;
-   /** Host multi-session turn-boundary policy (#364). Accepts a boolean
-    *  shorthand (`true` → count host-injected custom_message entries as turn
-    *  boundaries) or a HostSessionConfig object. Default: off — pi-native
-    *  behavior where only genuine user-role messages start a turn, so existing
-    *  single-session users' nudge cadence is unchanged. Enable for inline
-    *  multi-session hosts (Prime RLM & co.) whose injected agent messages must
-    *  delimit real turns. See docs/host-adapter.md. */
-   hostSession?: boolean | HostSessionConfig;
+  /** Character-level degenerate-repeat guard (see DegenerationGuardConfig).
+   *  Collapses long single-codepoint runs (e.g. 4655×「【」) in assistant
+   *  text/thinking of the outgoing view and injects a one-shot recovery notice
+   *  after a degenerated turn — breaking the abort loop where pi replays the
+   *  degenerated thinking back to the provider on every request (issue #351).
+   *  Distinct from `repetitionGuard`, which is tool-call level. Accepts a
+   *  boolean shorthand (`false` disables) or an object. Default: enabled,
+   *  minRun=200. */
+  degenerationGuard?: boolean | DegenerationGuardConfig;
+  /** Host multi-session turn-boundary policy (#364). Accepts a boolean
+   *  shorthand (`true` → count host-injected custom_message entries as turn
+   *  boundaries) or a HostSessionConfig object. Default: off — pi-native
+   *  behavior where only genuine user-role messages start a turn, so existing
+   *  single-session users' nudge cadence is unchanged. Enable for inline
+   *  multi-session hosts (Prime RLM & co.) whose injected agent messages must
+   *  delimit real turns. See docs/host-adapter.md. */
+  hostSession?: boolean | HostSessionConfig;
   /** Legacy flat alias for `delegate.displayUsage`. Kept for backward
    *  compatibility with existing acp.json files. Prefer `delegate.displayUsage`. */
   displayUsage?: "merged" | "separate";
