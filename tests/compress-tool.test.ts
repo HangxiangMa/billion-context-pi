@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile, rm } from "node:fs/promises";
+import type { CompressionBlock, CompressionState } from "acp-kernel";
 import { createAcpExtension } from "../src/index.js";
+import { blockSpanLabel, isCompressNoopText, isCompressSuccessText } from "../src/compress-tool.js";
 
 // ─── helpers (mirror decompress-tool.test.ts) ──────────────────────────────
 
@@ -201,4 +203,137 @@ test("compress in an in-memory session (no session file) survives to the next co
   report = await statusText();
   assert.match(report, /b1 \(T1\)/, `b1 must survive after the second compress: ${report}`);
   assert.match(report, /b2 \(T1\)/, `second block must be numbered b2 (nextBlockId retained), not reset to b1: ${report}`);
+});
+
+// issue #376: the panel line must report each NEW block's id and its ACTUAL
+// ref span (from effectiveMessageIds), so the model's block ledger matches
+// reality instead of being inferred from the requested startId/endId.
+test("compress panel lists every new block id with its actual ref span (#376)", async () => {
+  const { api, handlers } = captureApi();
+  // minCompressRange gate needs ≥5000 chars per range (same pattern as #309/#322).
+  createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
+  const BIG = "中".repeat(6000);
+  const stateFile = "/tmp/pai-acp-compress-spans.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const entries = [userMsg("e1", BIG), userMsg("e2", BIG), userMsg("e3", BIG), userMsg("e4", BIG)];
+  const ctx = fakeCtx(entries, stateFile);
+  ctx.__setUsage(100_000);
+  await runContextRound(handlers, ctx);
+
+  const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+  const out = await compressTool.execute(
+    "tc1",
+    { content: [
+      { startId: "m00001", endId: "m00001", summary: "first range: span reporting test for issue 376 block ledger accuracy" },
+      { startId: "m00003", endId: "m00003", summary: "third entry compressed for the span reporting test of issue 376" },
+    ] },
+    undefined, undefined, ctx,
+  );
+  const text = typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
+  assert.ok(text.includes("▣ ACP"), `compress failed: ${text}`);
+  assert.ok(!text.includes("Errors:"), `compress rejected: ${text}`);
+
+  const m = /reclaimed, blocks: (.+)\)$/.exec(text.split("\n")[0]!);
+  assert.ok(m, `panel missing per-block spans: ${text}`);
+  const parts = m![1]!.split(", ");
+  assert.equal(parts.length, 2, `expected two block entries: ${m![1]}`);
+  assert.match(parts[0]!, /^b1=(?:m\d{5}(?:–m\d{5})?\*?)$/, `first entry must be b1 with a ref span: ${parts[0]}`);
+  assert.match(parts[1]!, /^b2=(?:m\d{5}(?:–m\d{5})?\*?)$/, `second entry must be b2 with a ref span: ${parts[1]}`);
+});
+
+// issue #376 acceptance: on a PARTIAL run (one range rejected, one applied)
+// the panel must still list exactly the blocks that were created.
+test("partial compress panel lists only the created blocks accurately (#376)", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
+  const BIG = "中".repeat(6000);
+  const stateFile = "/tmp/pai-acp-compress-partial-spans.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const entries = [userMsg("e1", BIG), userMsg("e2", BIG), userMsg("e3", BIG), userMsg("e4", BIG)];
+  const ctx = fakeCtx(entries, stateFile);
+  ctx.__setUsage(100_000);
+  await runContextRound(handlers, ctx);
+
+  const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+  async function doCompress(callId: string, ranges: any[]) {
+    const o = await compressTool.execute(callId, { content: ranges }, undefined, undefined, ctx);
+    return typeof o === "string" ? o : o.content?.[0]?.text ?? String(o);
+  }
+
+  const first = await doCompress("tc1", [{ startId: "m00001", endId: "m00001", summary: "first range for the partial span reporting regression test" }]);
+  assert.ok(first.includes("blocks: b1="), `first compress missing span clause: ${first}`);
+
+  const partial = await doCompress("tc2", [
+    { startId: "m00001", endId: "m00001", summary: "duplicate range that must be rejected because already compressed" },
+    { startId: "m00002", endId: "m00002", summary: "second range for the partial span reporting regression test" },
+  ]);
+  assert.ok(partial.includes("Errors:"), `partial run must report the rejected range: ${partial}`);
+  assert.match(partial, /already covered by active block/i, `expect already-covered rejection: ${partial}`);
+  const m = /reclaimed, blocks: (b\d+(?:\(T\d\))?=(?:m\d{5}(?:–m\d{5})?\*?))\)$/.exec(partial.split("\n")[0]!);
+  assert.ok(m, `partial panel missing per-block spans: ${partial}`);
+  assert.equal(m![1]!.startsWith("b2="), true, `only the new block b2 may be listed: ${m![1]}`);
+});
+
+function makeBlock(over: Partial<CompressionBlock>): CompressionBlock {
+  return {
+    blockId: "b1", runId: "r1", tier: 1, summary: "s",
+    directMessageIds: [], effectiveMessageIds: [], directBlockIds: [],
+    compressedTokens: 0, createdAt: 0, survivedCount: 0, generation: "young", active: true,
+    ...over,
+  };
+}
+
+function makeState(byRaw: Record<string, string>): CompressionState {
+  const byRef: Record<string, string> = {};
+  for (const [raw, ref] of Object.entries(byRaw)) byRef[ref] = raw;
+  return {
+    blocks: [], messageRefs: { byRaw, byRef }, tokenSnapshot: {},
+    nudge: { lastPerMessageNudgeTokens: 0, lastNudgeShownTokens: 0, baselineTokens: 0, anchors: {}, lastShownByTier: {} },
+    stats: { tokensCompressed: 0, compressionCount: 0 }, nextBlockId: 2, nextRunId: 1,
+  };
+}
+
+test("blockSpanLabel: contiguous span, no star", () => {
+  const refs = { r1: "m00001", r2: "m00002", r3: "m00003", r4: "m00004", r5: "m00005" };
+  const b = makeBlock({ effectiveMessageIds: ["r1", "r2", "r3", "r4", "r5"] });
+  assert.equal(blockSpanLabel(b, makeState(refs)), "b1=m00001–m00005");
+});
+
+test("blockSpanLabel: interior exclusion marked with *", () => {
+  const refs = { r1: "m00001", r2: "m00002", r3: "m00003", r4: "m00004", r5: "m00005" };
+  const b = makeBlock({ effectiveMessageIds: ["r1", "r3", "r5"] });
+  assert.equal(blockSpanLabel(b, makeState(refs)), "b1=m00001–m00005*");
+});
+
+test("blockSpanLabel: trailing exclusion is NOT a star (span itself is accurate)", () => {
+  const refs = { r1: "m00001", r2: "m00002", r3: "m00003", r4: "m00004" };
+  const b = makeBlock({ effectiveMessageIds: ["r1", "r2", "r3"] });
+  assert.equal(blockSpanLabel(b, makeState(refs)), "b1=m00001–m00003");
+});
+
+test("blockSpanLabel: pre-existing numbering gap without byRef entry is not an exclusion", () => {
+  const refs = { r1: "m00001", r2: "m00003" };
+  const b = makeBlock({ effectiveMessageIds: ["r1", "r2"] });
+  assert.equal(blockSpanLabel(b, makeState(refs)), "b1=m00001–m00003");
+});
+
+test("blockSpanLabel: single-message span renders bare; tier >= 2 marked", () => {
+  const refs = { r3: "m00003" };
+  assert.equal(blockSpanLabel(makeBlock({ effectiveMessageIds: ["r3"] }), makeState(refs)), "b1=m00003");
+  const t2 = makeBlock({ blockId: "b6", tier: 2, effectiveMessageIds: ["r3"] });
+  assert.equal(blockSpanLabel(t2, makeState(refs)), "b6(T2)=m00003");
+});
+
+test("blockSpanLabel: unresolvable ids fall back to the bare block id", () => {
+  const b = makeBlock({ effectiveMessageIds: ["orphan-raw-id"] });
+  assert.equal(blockSpanLabel(b, makeState({})), "b1");
+});
+
+test("panel parser accepts both legacy count form and #376 span form", () => {
+  assert.equal(isCompressSuccessText("▣ ACP | 58.5K → 5.7K tokens (~52.8K reclaimed, 4 blocks)"), true);
+  assert.equal(isCompressSuccessText("▣ ACP | 61.1K → 13.7K tokens (~47.4K reclaimed, blocks: b3=m00044–m00097*, b4=m00103–m00123*)"), true);
+  assert.equal(isCompressNoopText("▣ ACP | 58.5K → 58.5K tokens (~0 reclaimed, 0 blocks)"), true);
+  assert.equal(isCompressNoopText("▣ ACP | 61.1K → 13.7K tokens (~47.4K reclaimed, blocks: b3=m00044–m00097*, b4=m00103–m00123*)"), false);
+  assert.equal(isCompressSuccessText("No ranges provided."), false);
+  assert.equal(isCompressNoopText("No ranges provided."), false);
 });
