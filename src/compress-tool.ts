@@ -341,7 +341,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   });
   const turnKey = lastUserMessageId(entries) ?? sid;
   const snapshot = compressibleSnapshotText(turn.nudge);
-  if (runtime.compressRetryCappedFor(turnKey)) {
+  if (runtime.compressRetryCappedFor(sid, turnKey)) {
     logWarn("compress", { sid, event: "capped-reject", turnKey });
     return cappedRejectionText(snapshot);
   }
