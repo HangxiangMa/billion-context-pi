@@ -246,6 +246,12 @@ cp -r ~/.pi/agent/sessions  <备份>/pi-sessions
 
 压缩引擎是 [`acp-kernel`](https://github.com/ranxianglei/acp-kernel) — 平台无关、MIT 许可的库,有 208 个测试。它被内联打包进 `dist/index.js`,因此零运行时依赖。
 
+## 社区
+
+交流、求助与更新都在 QQ——同一个群覆盖三个项目(`billion-context`、`billion-context-pi`、`opencode-acp`):
+
+**QQ 群:1056132097**
+
 ## 许可证
 
 MIT.
