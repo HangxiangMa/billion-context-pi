@@ -154,13 +154,17 @@ function jsonParseError(content: CompressArgs["content"]): string | undefined {
 /** Panel block count, or -1 for non-panels. Accepts BOTH the legacy
  *  "… B blocks)" form (0-block runs; historical transcripts replayed by
  *  index/floor-stale) and the #376 "… blocks: b3=m00044–m00097*, …" form. */
-function compressPanelBlocks(text: string): number {
+export function compressPanelBlocks(text: string): number {
   if (!text.trimStart().startsWith("▣ ACP |")) return -1;
   const m = text.match(/, (\d+) blocks?\)/);
   if (m) return Number(m[1]);
-  const list = text.match(/, blocks: ([^)]*)\)/);
-  if (list) return (list[1] ?? "").split(",").map((s) => s.trim()).filter(Boolean).length;
-  return -1;
+  // Count span-form entries by their label tokens (bN= / bN(Tn)=), NOT by
+  // capturing to the next ")" — tier labels carry a ")" that would truncate a
+  // naive capture and undercount any batch whose first new block is T2/T3.
+  const idx = text.indexOf(", blocks: ");
+  if (idx === -1) return -1;
+  const header = text.slice(idx).split("\n", 1)[0] ?? "";
+  return header.match(/\bb\d+(?:\(T\d+\))?=/g)?.length ?? 0;
 }
 
 /** Success = completed run that created >= 1 block (partial range errors

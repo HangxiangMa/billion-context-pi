@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFile, rm } from "node:fs/promises";
 import type { CompressionBlock, CompressionState } from "acp-kernel";
 import { createAcpExtension } from "../src/index.js";
-import { blockSpanLabel, isCompressNoopText, isCompressSuccessText } from "../src/compress-tool.js";
+import { blockSpanLabel, compressPanelBlocks, isCompressNoopText, isCompressSuccessText } from "../src/compress-tool.js";
 
 // ─── helpers (mirror decompress-tool.test.ts) ──────────────────────────────
 
@@ -336,4 +336,16 @@ test("panel parser accepts both legacy count form and #376 span form", () => {
   assert.equal(isCompressNoopText("▣ ACP | 61.1K → 13.7K tokens (~47.4K reclaimed, blocks: b3=m00044–m00097*, b4=m00103–m00123*)"), false);
   assert.equal(isCompressSuccessText("No ranges provided."), false);
   assert.equal(isCompressNoopText("No ranges provided."), false);
+});
+
+test("compressPanelBlocks counts tier labels correctly ((Tn) carries a paren)", () => {
+  assert.equal(compressPanelBlocks("▣ ACP | 58.5K → 5.7K tokens (~52.8K reclaimed, 4 blocks)"), 4);
+  assert.equal(compressPanelBlocks("▣ ACP | 58.5K → 5.7K tokens (~52.8K reclaimed, 1 block)"), 1);
+  assert.equal(compressPanelBlocks("▣ ACP | 58.5K → 58.5K tokens (~0 reclaimed, 0 blocks)"), 0);
+  assert.equal(compressPanelBlocks("▣ ACP | 61.1K → 13.7K tokens (~47.4K reclaimed, blocks: b3=m00044–m00097*)"), 1);
+  assert.equal(compressPanelBlocks("▣ ACP | 61.1K → 13.7K tokens (~47.4K reclaimed, blocks: b3=m00044–m00097*, b4=m00103–m00123*)"), 2);
+  assert.equal(compressPanelBlocks("▣ ACP | 61.1K → 13.7K tokens (~47.4K reclaimed, blocks: b3=m00044–m00097*, b4(T2)=m00103–m00123*)"), 2);
+  // regression: FIRST listed block is tier >= 2 — a capture-to-next-")" parse returns 1 here
+  assert.equal(compressPanelBlocks("▣ ACP | 61.1K → 13.7K tokens (~47.4K reclaimed, blocks: b3(T2)=m00044–m00097, b4(T2)=m00103–m00123*)"), 2);
+  assert.equal(compressPanelBlocks("No ranges provided."), -1);
 });
