@@ -246,6 +246,12 @@ Restore them next to each other on the target machine. For clone/fork children, 
 
 The compression engine is [`acp-kernel`](https://github.com/ranxianglei/acp-kernel) — a platform-agnostic, MIT-licensed library with 208 tests. It's bundled inline into `dist/index.js`, so there are zero runtime dependencies.
 
+## Community
+
+Discussion, help, and updates on QQ — one group covers all three projects (`billion-context`, `billion-context-pi`, `opencode-acp`):
+
+**QQ Group: 1056132097**
+
 ## License
 
 MIT.
