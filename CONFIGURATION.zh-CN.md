@@ -570,6 +570,13 @@
 
    **严格回传的思考型上游（自动禁用）。** 少数思考模式 provider 在已闭合轮次的 assistant 消息丢失 reasoning 后，会以 HTTP 400（`The \`reasoning_content\` ... must be passed back to the API`）拒绝重放请求。适配器通过静态检测识别 **DeepSeek**——模型的 `baseUrl` 或 provider 名包含 `deepseek`（不区分大小写）——并对该模型自动强制 `drop: false`，即使显式配置了 `drop: true` 也会为安全起见覆盖。对非思考的 DeepSeek 模型零成本（它们不产生可丢弃的 `thinking` 部分）。**不在** `deepseek` 主机上的严格回传 provider——GLM-thinking、QwQ、自托管 DeepSeek 镜像——刻意不做自动检测（否则会禁用其非思考模型的该 pass），请对它们使用上面的按 provider 覆盖。配套修复：代理侧 billion-context#690、内核侧折叠原子性 acp-kernel#245（随 acp-kernel 0.0.63 发布）；跟踪于 [#361](https://github.com/ranxianglei/billion-context-pi/issues/361)。
 
+### `compress.promptPack`
+
+- **类型：** `string` — 包名（`[A-Za-z0-9][A-Za-z0-9._-]*`，不含路径分隔符）
+- **默认：** `"default"`
+- **状态：** 🟢 ACTIVE
+- **描述：** 选择一个**提示词包（prompt pack）**——一组命名的表面覆盖（提示词分段、nudge 分段、工具提示词、delegate 提示词、四条压缩规则），作为 `acp.json` 内联覆盖之下的基础层生效。与其他 `compress.*` 字段走同一三级级联：`models > providers > global`，逐回合按当前模型解析。完整参考与内置 `lean` 包见[提示词包](#提示词包)。
+
 ### `compress.providers` —— 按 provider / 按 model 覆盖
 
 - **类型：** object —— provider 名 → `{ ...<compress 字段>, models: { modelId → <compress 字段> } }` 的映射
@@ -700,6 +707,77 @@ provider 的 key 是 **Pi provider 名**(如 `"anthropic"`、`"openai"`、`"zhip
 - **默认值：** `false`
 - **状态：** 🟢 ACTIVE
 - **说明：** `prompts` 覆盖的安全门禁。设为 `true` 以确认替换内核调优的压缩规则可能降低摘要质量，并使你的 `prompts` 覆盖生效。为 `false`（或省略）时，所有 `prompts` 覆盖被忽略，使用内核默认值。如果 `resolvePrompts` 拒绝了你的覆盖（例如某个仍通过类型检查的畸形值），扩展会回退到默认值并记录 `prompts-resolve-failed` 警告，而不是启动失败。
+
+---
+
+## 提示词包
+
+**提示词包（prompt pack）**是一个命名的 JSON 文件，把表面覆盖打包——提示词分段、nudge 分段、工具提示词、delegate 提示词、四条承重压缩规则——切模型整个 ACP 表面只需一行，不必把整块 `promptSections`/`toolPrompts` JSON 粘进 `acp.json`：
+
+```json
+{ "compress": { "promptPack": "lean" } }
+```
+
+包选择复用标准 `compress` 三级级联（`models > providers > global`，逐字段最深者赢），因此不同模型用不同包不需要额外配置管道：
+
+```json
+{ "compress": { "providers": { "zhipu": { "promptPack": "lean" } } } }
+```
+
+### 查找顺序
+
+包名 `N`，首个命中者生效：
+
+1. `<项目>/.pi/acp/packs/N.json` — 项目本地（最后检查但优先——可遮蔽以下两者）
+2. `~/.pi/acp/packs/N.json` — 用户全局
+3. 内置包：`default`、`lean`
+
+包名必须匹配 `[A-Za-z0-9][A-Za-z0-9._-]*`（禁止 `..` 与路径分隔符）；非法名字、不可读或非法 JSON 的文件都回退到内置包——适配器绝不因坏包崩溃。
+
+### 包文件 schema
+
+```jsonc
+{
+  "name": "my-pack",              // 信息性
+  "version": "1.0.0",             // 信息性
+  "description": "...",           // 信息性
+  "prompts": {                     // 4 条承重规则字符串（有风险门，见下）
+    "compressPhilosophy": "...",
+    "howToCompressRules": "...",
+    "tier2DistillRules": "...",
+    "tier3CondenseRules": "..."
+  },
+  "promptSections": { "acpTags": "...", "tier2": null },   // 与 acp.json promptSections 同 schema
+  "nudgeSections": { "efficiencyNote": "..." },             // 与 acp.json nudgeSections 同 schema
+  "toolPrompts": { "compress": { "description": "..." } }, // 与 acp.json toolPrompts 同 schema
+  "delegatePrompt": "..."          // string 替换，null 删除
+}
+```
+
+所有字段可选；每个字段走与其 `acp.json` 对应项相同的消毒器，每个 section 内的每个键都是三态（`string` 替换、`null` 删除、缺省保留包/内置值）。
+
+### 合并语义——包为基础层，内联优先
+
+一回合的有效表面 = **包默认值 ⊕ `acp.json` 内联覆盖**，逐字段：
+
+- `promptSections` / `nudgeSections`：内联键胜包键（含 `null`）。
+- `toolPrompts`：先按工具，再按字段（`description`、`promptSnippet`、`promptGuidelines`），再按 `paramDescriptions` 内逐参数。
+- `delegatePrompt`：内联存在则胜（含 `null`）。
+
+### 风险门
+
+包的 `prompts` 块会覆盖压缩规则字符串，与内联 `prompts` 完全一样——因此受同一个 [`acknowledgePromptsRisk`](#acknowledgepromptsrisk) 开关门控。`acp.json` 未设该标志时，包的 `prompts` 块被忽略（包内其余照常生效）并记录警告。该标志不能随包分发——它必须是显式的本地选择。
+
+### 内置包
+
+| 名称 | 用途 |
+|------|------|
+| `default` | 无覆盖——完整内置表面。 |
+| `lean` | Token 精简表面：一个紧凑系统提示词块 + 单行工具描述，无 snippet/guidelines（实测 5422→1312 字节，约省 76%）。压缩规则保持内核默认，由 nudge 按需送达。改编自社区调研 [#410](https://github.com/ranxianglei/billion-context-pi/issues/410)。 |
+
+### `lean` 细节
+
+`lean` 包把系统提示词除单个 `acpTags` 块（八条单行规则：refs、压什么、保留什么、召回工具、重编号恢复、解压到文件、节流续作、摘要是历史）外全部置空，四个工具的 `promptSnippet`/`promptGuidelines` 全部清空，`description` 换成单行。未覆盖的部分——压缩哲学、分层规则、nudge 文本——保持内置默认。适合会把工具 schema 原样抄进回答的小模型，或想把编码 token 最大化拿回来的场景。试用：`{ "compress": { "promptPack": "lean" } }`。
 
 ---
 

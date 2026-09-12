@@ -11,6 +11,10 @@ export interface PiPromptSections {
   decompressPhilosophy?: SectionOverride;
   contextBreakdown?: SectionOverride;
   throttleRetry?: SectionOverride;
+  philosophy?: null;
+  howToCompress?: null;
+  tier2?: null;
+  tier3?: null;
 }
 
 const SECTIONS: ReadonlyArray<readonly [string, string]> = [
@@ -73,12 +77,16 @@ const PROMPT_SECTION_KEYS: ReadonlySet<string> = new Set([
   "multiTierIntro", "decompressPhilosophy", "contextBreakdown", "throttleRetry",
 ]);
 
+const RULE_SLOT_KEYS: ReadonlySet<string> = new Set(["philosophy", "howToCompress", "tier2", "tier3"]);
+
 export function sanitizePromptSections(raw: unknown): Partial<PiPromptSections> {
   if (!raw || typeof raw !== "object") return {};
   const out: Partial<PiPromptSections> = {};
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
     if (PROMPT_SECTION_KEYS.has(k) && (typeof v === "string" || v === null)) {
       (out as Record<string, SectionOverride>)[k] = v;
+    } else if (RULE_SLOT_KEYS.has(k) && v === null) {
+      (out as Record<string, SectionOverride>)[k] = null;
     }
   }
   return out;
