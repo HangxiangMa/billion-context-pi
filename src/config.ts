@@ -251,6 +251,14 @@ export interface AdapterConfig {
    *  boolean shorthand (`false` disables) or an object. Default: enabled,
    *  minRun=200. */
   degenerationGuard?: boolean | DegenerationGuardConfig;
+  /** Host multi-session turn-boundary policy (#364). Accepts a boolean
+   *  shorthand (`true` → count host-injected custom_message entries as turn
+   *  boundaries) or a HostSessionConfig object. Default: off — pi-native
+   *  behavior where only genuine user-role messages start a turn, so existing
+   *  single-session users' nudge cadence is unchanged. Enable for inline
+   *  multi-session hosts (Prime RLM & co.) whose injected agent messages must
+   *  delimit real turns. See docs/host-adapter.md. */
+  hostSession?: boolean | HostSessionConfig;
   /** Legacy flat alias for `delegate.displayUsage`. Kept for backward
    *  compatibility with existing acp.json files. Prefer `delegate.displayUsage`. */
   displayUsage?: "merged" | "separate";
@@ -364,6 +372,37 @@ export function resolveRepetitionGuard(adapter: AdapterConfig): { enabled: boole
     return { enabled: g.enabled !== false, warn, abort };
   }
   return { enabled: true, warn: REPETITION_GUARD_DEFAULTS.warn, abort: REPETITION_GUARD_DEFAULTS.abort };
+}
+
+/** Host multi-session turn-boundary policy (#364). See TurnBoundaryPolicy in
+ *  src/turn-boundary.ts for the semantics this resolves. */
+export interface HostSessionConfig {
+  /** Count host-injected custom_message entries (agent_message) as turn
+   *  boundaries. Default: false (pi-native behavior). */
+  countCustomMessages?: boolean;
+}
+
+export interface ResolvedHostSession {
+  countCustomMessages: boolean;
+}
+
+/** Resolve the host-session turn-boundary policy from the adapter, handling
+ *  the boolean shorthand (`true` enables countCustomMessages). Invalid values
+ *  fall back to the pi-native default (off) with a logged warning — they never
+ *  fail the session. */
+export function resolveHostSession(adapter: AdapterConfig): ResolvedHostSession {
+  const h = adapter.hostSession;
+  if (h === true) return { countCustomMessages: true };
+  if (h && typeof h === "object") {
+    if (typeof h.countCustomMessages !== "boolean") {
+      logWarn("config", { event: "host-session-invalid", field: "countCustomMessages", value: String(h.countCustomMessages), fallback: "false" });
+    }
+    return { countCustomMessages: h.countCustomMessages === true };
+  }
+  if (h !== undefined && h !== false) {
+    logWarn("config", { event: "host-session-invalid", value: String(h), fallback: "off" });
+  }
+  return { countCustomMessages: false };
 }
 
 /** Per-field deepest-wins merge of the three compression levels (global →
