@@ -9,7 +9,7 @@ import {
   type Prompts,
 } from "acp-kernel";
 import { resolveCompress, resolveConfig, type AdapterConfig } from "./config.js";
-import { resolveReasoningDrop, type CompressReasoningConfig } from "./reasoning-drop.js";
+import { applyStrictReasoningGate, resolveReasoningDrop, type CompressReasoningConfig } from "./reasoning-drop.js";
 import { entriesToCoreMessages, extractText, matchesStoredText, messageIdentity, messageRef } from "./messages.js";
 import { SessionStateStore, type LiveRefOrigin } from "./state.js";
 import { hasCompressHistory, rebuildStateFromLog } from "./state-rebuild.js";
@@ -345,6 +345,10 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     tokenScaleStale.delete(sid);
   }
 
+  // [#361] session ids already logged for the strict-echo auto-disable, so the
+  // info event fires once per session rather than once per LLM call.
+  const strictEchoLogged = new Set<string>();
+
   // Compress-failure tracking (see wireContextTransform): counts FAILED/no-op
   // compress calls per user turn so the nudge circuit breaker can stop
   // re-injecting the nudge at a model that answers every nudge with another
@@ -418,8 +422,20 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   }
 
   function reasoningDropFor(ctx: ExtensionContext): Required<CompressReasoningConfig> {
-    const m = ctx.model as { provider?: string; id?: string } | undefined;
-    return resolveReasoningDrop(resolveCompress(adapterRef.compress, m?.provider, m?.id).reasoning);
+    const m = ctx.model as { provider?: string; id?: string; baseUrl?: string } | undefined;
+    const resolved = resolveReasoningDrop(resolveCompress(adapterRef.compress, m?.provider, m?.id).reasoning);
+    // [#361] strict-echo upstreams (DeepSeek thinking mode) must keep reasoning
+    // round-tripping or the rebuilt request 400s — force the pass off regardless
+    // of config so a thinking-mode session can't be broken by default drop:true.
+    const gated = applyStrictReasoningGate(resolved, m?.provider, m?.baseUrl);
+    if (resolved.drop && !gated.drop) {
+      const sid = ctx.sessionManager.getSessionId();
+      if (!strictEchoLogged.has(sid)) {
+        strictEchoLogged.add(sid);
+        logInfo("runtime", { sid, event: "compress-reasoning-auto-disabled", reason: "strict-echo-upstream", provider: m?.provider ?? null, issue: "#361" });
+      }
+    }
+    return gated;
   }
 
   async function reloadConfig(cwd: string): Promise<void> {

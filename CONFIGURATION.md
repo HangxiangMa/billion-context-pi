@@ -533,9 +533,12 @@ The flow is:
   - `drop` (`boolean`, default `true`) — master switch; `false` disables the pass (kill-switch).
   - `threshold` (`number`, chars, default `2048`) — single-thinking size gate.
 
-  Providers whose thinking items are opaque and must round-trip unmodified (e.g. OpenAI encrypted reasoning) can opt out per-provider:\n  ```json
-  { "compress": { "providers": { "openai": { "reasoning": { "drop": false } } } } }
-  ```
+  Providers whose thinking items are opaque and must round-trip unmodified (e.g. OpenAI encrypted reasoning) can opt out per-provider:
+   ```json
+   { "compress": { "providers": { "openai": { "reasoning": { "drop": false } } } } }
+   ```
+
+   **Strict-echo thinking upstreams (auto-disabled).** A few thinking-mode providers reject a rebuilt request with HTTP 400 (`The \`reasoning_content\` ... must be passed back to the API`) once a closed-round assistant message loses its reasoning. The adapter detects **DeepSeek** statically — the model's `baseUrl` or provider name contains `deepseek` (case-insensitive) — and forces `drop: false` for that model automatically, overriding an explicit `drop: true` for safety. This is cost-free for non-thinking DeepSeek models, which emit no `thinking` parts to drop. Strict-echo providers **not** on a `deepseek` host — GLM-thinking, QwQ, self-hosted DeepSeek mirrors — are deliberately not auto-detected (that would disable the pass for their non-thinking models); use the per-provider override above for those. Twin fixes: proxy-side billion-context#690 and kernel-side fold atomicity acp-kernel#245 (shipped in acp-kernel 0.0.63); tracked in [#361](https://github.com/ranxianglei/billion-context-pi/issues/361).
 
 ### `compress.providers` — per-provider & per-model overrides
 
