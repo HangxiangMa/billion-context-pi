@@ -224,8 +224,11 @@ test("readToolSurfaceWithPacks: home config fills, cwd config wins", async () =>
   const home = await mkdtemp(path.join(tmpdir(), "acp-home-"));
   const dir = await mkdtemp(path.join(tmpdir(), "acp-cwd-"));
   const oldHome = process.env.HOME;
+  const oldUserProfile = process.env.USERPROFILE;
   try {
+    // os.homedir() resolves USERPROFILE on Windows, HOME elsewhere — set both.
     process.env.HOME = home;
+    process.env.USERPROFILE = home;
     await mkdir(path.join(home, ".pi"), { recursive: true });
     await writeFile(path.join(home, ".pi/acp.json"), JSON.stringify({ toolPrompts: { compress: { promptSnippet: "home-snip", description: "HOME DESC" } } }), "utf8");
     await mkdir(path.join(dir, ".pi"), { recursive: true });
@@ -241,6 +244,8 @@ test("readToolSurfaceWithPacks: home config fills, cwd config wins", async () =>
   } finally {
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;
+    if (oldUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = oldUserProfile;
     await rm(home, { recursive: true, force: true });
     await rm(dir, { recursive: true, force: true });
   }
