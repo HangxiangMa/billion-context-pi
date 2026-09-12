@@ -1,67 +1,31 @@
 import { readFileSync } from "node:fs";
 import * as path from "node:path";
 import { homedir } from "node:os";
-import type { Prompts } from "acp-kernel";
+import {
+  builtinSource,
+  createDirPackSource,
+  createPackResolver,
+  defaultPack,
+  defaultPackSources as kernelPackSources,
+  isValidPackName,
+  leanPack,
+  sanitizePackSurface,
+} from "acp-kernel";
+import type { Pack, PackResolver, PackSource, PackSurface, PromptPackFile, Prompts } from "acp-kernel";
 import type { AdapterConfig } from "./config.js";
 import { resolveCompress } from "./config.js";
 import { CONFIG_DIR_NAME } from "./config-dir.js";
-import type { PiPromptSections } from "./system-prompt.js";
+import { sanitizePromptSections, type PiPromptSections } from "./system-prompt.js";
 import { sanitizeToolPrompts, type AcpToolName, type NudgeSectionsConfig, type ToolPromptsConfig } from "./surface.js";
-import { builtinSource, defaultPack } from "./packs/builtin.js";
-import { createDirPackSource } from "./packs/dir.js";
-import { isValidPackName, type Pack, type PackSource, type PackSurface } from "./packs/types.js";
 
-export { leanPack } from "./packs/lean.js";
-export { defaultPack, builtinSource } from "./packs/builtin.js";
-export { createDirPackSource } from "./packs/dir.js";
-export { packSurface } from "./packs/sanitize.js";
-export { isValidPackName };
-export type { Pack, PackSource, PackSurface, PromptPackFile } from "./packs/types.js";
-
-/**
- * Ordered pack resolution over pluggable sources. The default chain is
- * [project dir > user dir > builtin]; custom sources (e.g. an installer-managed
- * registry) can be prepended without touching any core code.
- */
-export interface PackResolver {
-  readonly sources: readonly PackSource[];
-  resolve(name: string): Pack | null;
-  listPacks(): Pack[];
-}
-
-export function createPackResolver(sources: readonly PackSource[]): PackResolver {
-  return {
-    sources,
-    resolve(name: string): Pack | null {
-      if (!isValidPackName(name)) return null;
-      for (const source of sources) {
-        const pack = source.resolve(name);
-        if (pack) return pack;
-      }
-      return null;
-    },
-    listPacks(): Pack[] {
-      const seen = new Set<string>();
-      const out: Pack[] = [];
-      for (const source of sources) {
-        for (const pack of source.list?.() ?? []) {
-          if (!seen.has(pack.name)) {
-            seen.add(pack.name);
-            out.push(pack);
-          }
-        }
-      }
-      return out;
-    },
-  };
-}
+export { builtinSource, createDirPackSource, createPackResolver, defaultPack, isValidPackName, leanPack, sanitizePackSurface };
+export type { Pack, PackResolver, PackSource, PackSurface, PromptPackFile };
 
 export function defaultPackSources(cwd: string): PackSource[] {
-  return [
-    createDirPackSource("project", path.join(cwd, CONFIG_DIR_NAME, "acp", "packs")),
-    createDirPackSource("user", path.join(homedir(), CONFIG_DIR_NAME, "acp", "packs")),
-    builtinSource,
-  ];
+  return kernelPackSources({
+    projectDir: path.join(cwd, CONFIG_DIR_NAME, "acp", "packs"),
+    userDirs: [path.join(homedir(), CONFIG_DIR_NAME, "acp", "packs")],
+  });
 }
 
 export function packResolver(cwd: string): PackResolver {
@@ -88,6 +52,72 @@ export function resolveActivePack(
   if (name === "default") return defaultPack;
   const r = resolver ?? packResolver(cwd);
   return r.resolve(name) ?? defaultPack;
+}
+
+const ACP_TOOLS: ReadonlySet<string> = new Set(["compress", "decompress", "search_context", "acp_status"]);
+
+export interface PiToolExtras {
+  promptSnippet?: string;
+  promptGuidelines?: string[];
+}
+
+export type PiToolExtrasConfig = Partial<Record<AcpToolName, PiToolExtras>>;
+
+export interface PiAdapterSurface {
+  promptSections: Partial<PiPromptSections>;
+  toolExtras: PiToolExtrasConfig;
+  delegatePrompt?: string | null;
+}
+
+/**
+ * Pi-specific part of a pack. `surface.adapters.pi` is opaque to the kernel,
+ * so the adapter sanitizes it here: tri-state prompt sections restricted to
+ * pi's section keys, per-tool extras with malformed fields dropped.
+ */
+export function piAdapterSurface(pack: Pack): PiAdapterSurface {
+  const raw = pack.surface.adapters?.pi;
+  const rec = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  const toolExtras: PiToolExtrasConfig = {};
+  const extrasRaw = rec.toolExtras;
+  if (extrasRaw && typeof extrasRaw === "object" && !Array.isArray(extrasRaw)) {
+    for (const [tool, value] of Object.entries(extrasRaw as Record<string, unknown>)) {
+      if (!ACP_TOOLS.has(tool) || !value || typeof value !== "object") continue;
+      const src = value as Record<string, unknown>;
+      const entry: PiToolExtras = {};
+      if (typeof src.promptSnippet === "string") entry.promptSnippet = src.promptSnippet;
+      if (typeof src.promptGuidelines === "string") {
+        entry.promptGuidelines = [src.promptGuidelines];
+      } else if (Array.isArray(src.promptGuidelines)) {
+        const guidelines = src.promptGuidelines.filter((g): g is string => typeof g === "string");
+        if (guidelines.length === src.promptGuidelines.length) entry.promptGuidelines = guidelines;
+      }
+      if (Object.keys(entry).length > 0) toolExtras[tool as AcpToolName] = entry;
+    }
+  }
+  const surface: PiAdapterSurface = {
+    promptSections: sanitizePromptSections(rec.promptSections),
+    toolExtras,
+  };
+  if (typeof rec.delegatePrompt === "string" || rec.delegatePrompt === null) {
+    surface.delegatePrompt = rec.delegatePrompt;
+  }
+  return surface;
+}
+
+function packToolPrompts(pack: Pack | null): ToolPromptsConfig {
+  const out: ToolPromptsConfig = {};
+  const toolPrompts = pack?.surface.toolPrompts;
+  if (toolPrompts) {
+    for (const [tool, overrides] of Object.entries(toolPrompts)) {
+      if (ACP_TOOLS.has(tool)) out[tool as AcpToolName] = { ...overrides };
+    }
+  }
+  if (pack) {
+    for (const [tool, extras] of Object.entries(piAdapterSurface(pack).toolExtras)) {
+      out[tool as AcpToolName] = { ...out[tool as AcpToolName], ...extras };
+    }
+  }
+  return out;
 }
 
 function mergeToolPrompts(pack?: ToolPromptsConfig, inline?: ToolPromptsConfig): ToolPromptsConfig {
@@ -130,15 +160,15 @@ export interface MergedSurface {
   delegatePrompt?: string | null;
 }
 
-export function mergeSurface(pack: PackSurface | null, inline: InlineSurface): MergedSurface {
-  const p = pack ?? {};
-  const prompts: Partial<Prompts> = { ...(p.prompts ?? {}), ...(inline.prompts ?? {}) };
+export function mergeSurface(pack: Pack | null, inline: InlineSurface): MergedSurface {
+  const s = pack?.surface ?? {};
+  const pi = pack ? piAdapterSurface(pack) : { promptSections: {}, toolExtras: {} };
   return {
-    prompts,
-    promptSections: { ...(p.promptSections ?? {}), ...(inline.promptSections ?? {}) },
-    nudgeSections: { ...(p.nudgeSections ?? {}), ...(inline.nudgeSections ?? {}) },
-    toolPrompts: mergeToolPrompts(p.toolPrompts, inline.toolPrompts),
-    delegatePrompt: inline.delegatePrompt !== undefined ? inline.delegatePrompt : p.delegatePrompt,
+    prompts: { ...(s.prompts ?? {}), ...(inline.prompts ?? {}) },
+    promptSections: { ...pi.promptSections, ...(inline.promptSections ?? {}) },
+    nudgeSections: { ...(s.nudgeSections ?? {}), ...(inline.nudgeSections ?? {}) },
+    toolPrompts: mergeToolPrompts(packToolPrompts(pack), inline.toolPrompts),
+    delegatePrompt: inline.delegatePrompt !== undefined ? inline.delegatePrompt : pi.delegatePrompt,
   };
 }
 
@@ -162,5 +192,5 @@ export function readToolSurfaceWithPacks(cwd: string): ToolPromptsConfig {
     }
   }
   const pack = packName === "default" || !isValidPackName(packName) ? null : packResolver(cwd).resolve(packName);
-  return mergeToolPrompts(pack?.surface.toolPrompts, inline);
+  return mergeToolPrompts(packToolPrompts(pack), inline);
 }

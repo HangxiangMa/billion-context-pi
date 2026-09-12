@@ -7,48 +7,65 @@ import { defaultPrompts } from "acp-kernel";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createAcpExtension } from "../src/index.js";
 import { buildAcpSystemPrompt } from "../src/system-prompt.js";
-import { leanPack } from "../src/packs/lean.js";
-import { defaultPack, builtinSource } from "../src/packs/builtin.js";
-import { createDirPackSource } from "../src/packs/dir.js";
-import type { Pack, PackSource } from "../src/packs/types.js";
+import { leanPack } from "../src/prompt-pack.js";
 import {
   isValidPackName,
   discoverPack,
   resolvePackName,
   resolveActivePack,
-  packSurface,
+  piAdapterSurface,
   mergeSurface,
   readToolSurfaceWithPacks,
   createPackResolver,
   defaultPackSources,
   packResolver,
+  defaultPack,
+  builtinSource,
+  createDirPackSource,
 } from "../src/prompt-pack.js";
 import type { AdapterConfig } from "../src/config.js";
+import type { Pack, PackSource } from "../src/prompt-pack.js";
 
 function adapter(compress?: AdapterConfig["compress"]): AdapterConfig {
   return { ...(compress ? { compress } : {}) };
 }
 
-test("lean pack is a standalone Pack with a clean surface", () => {
+function leanPiSections(): Record<string, unknown> {
+  const raw = leanPack.surface.adapters?.pi;
+  const rec = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const sections = rec.promptSections;
+  return sections && typeof sections === "object" ? (sections as Record<string, unknown>) : {};
+}
+
+test("lean pack is a kernel builtin carrying its pi surface under adapters", () => {
   assert.equal(leanPack.name, "lean");
   assert.equal(leanPack.source, "builtin:lean");
-  const s = leanPack.surface;
-  assert.equal(s.promptSections?.acpTags, leanPack.surface.promptSections?.acpTags);
+  assert.equal(leanPack.surface.promptSections, undefined);
+  assert.equal(leanPack.surface.delegatePrompt, undefined);
+  assert.equal(leanPack.surface.prompts, undefined);
+  assert.equal(typeof leanPack.surface.toolPrompts?.compress?.description, "string");
+  const rules = leanPiSections().acpTags;
+  assert.equal(typeof rules, "string");
+  assert.ok(String(rules).includes("Recall on demand only"));
+  assert.ok(String(rules).includes("settled history"));
+  assert.ok(String(rules).includes("makes recall unnecessary"));
+});
+
+test("piAdapterSurface(leanPack): aligned rules kept, every other section nulled, lean tool extras", () => {
+  const s = piAdapterSurface(leanPack);
+  assert.equal(s.promptSections.acpTags, leanPiSections().acpTags);
   for (const k of ["summariesInContext", "tools", "philosophy", "howToCompress", "tier2", "tier3", "multiTierIntro", "decompressPhilosophy", "contextBreakdown", "throttleRetry", "whenToCompress", "whenNotToCompress"]) {
-    assert.equal((s.promptSections as Record<string, unknown>)?.[k], null, `${k} should be null`);
+    assert.equal((s.promptSections as Record<string, unknown>)[k], null, `${k} should be null`);
   }
-  assert.equal(s.toolPrompts?.compress?.promptSnippet, "");
-  assert.deepEqual(s.toolPrompts?.compress?.promptGuidelines, []);
-  assert.equal(typeof s.toolPrompts?.compress?.description, "string");
-  for (const t of ["decompress", "search_context", "acp_status"]) {
-    assert.equal(s.toolPrompts?.[t as "decompress"]?.promptSnippet, "");
+  for (const t of ["compress", "decompress", "search_context", "acp_status"] as const) {
+    assert.deepEqual(s.toolExtras[t], { promptSnippet: "", promptGuidelines: [] });
   }
   assert.equal(s.delegatePrompt, undefined);
-  assert.equal(s.prompts, undefined);
+  assert.deepEqual(piAdapterSurface(defaultPack), { promptSections: {}, toolExtras: {} });
 });
 
 test("lean pack system prompt collapses to header + lean bullets", () => {
-  const merged = mergeSurface(leanPack.surface, {});
+  const merged = mergeSurface(leanPack, {});
   const text = buildAcpSystemPrompt(defaultPrompts, merged.promptSections);
   assert.ok(text.startsWith("\nACP context management\n\n"));
   assert.ok(text.includes("Never echo the XML tags"));
@@ -72,7 +89,7 @@ test("resolvePackName walks the three compress levels, model wins", () => {
   assert.equal(resolvePackName(c), "lean");
 });
 
-test("resolveActivePack: default pack for no selection; project file discovered; project shadows builtin", async () => {
+test("resolveActivePack: default pack for no selection; project file discovered; project shadows builtin; filename is identity", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "acp-pack-"));
   try {
     assert.equal(resolveActivePack(adapter(), dir).name, "default");
@@ -86,6 +103,10 @@ test("resolveActivePack: default pack for no selection; project file discovered;
     const found = resolveActivePack(adapter({ promptPack: "my-pack" }), dir);
     assert.equal(found?.name, "my-pack");
     assert.match(found.source, /^file:.*my-pack\.json$/);
+
+    await writeFile(path.join(dir, ".pi/acp/packs/alias.json"), JSON.stringify({ name: "inner-name" }), "utf8");
+    assert.equal(packResolver(dir).resolve("alias")?.name, "alias");
+    assert.equal(packResolver(dir).resolve("inner-name"), null);
 
     await writeFile(path.join(dir, ".pi/acp/packs/lean.json"), JSON.stringify({ name: "lean", promptSections: { acpTags: "SHADOW LEAN" } }), "utf8");
     const shadow = resolveActivePack(adapter({ promptPack: "lean" }), dir);
@@ -106,13 +127,22 @@ test("discoverPack rejects path traversal names", () => {
 });
 
 test("mergeSurface: inline wins per field, pack fills the rest", () => {
-  const pack = packSurface({
-    promptSections: { acpTags: "PACK TAGS", tools: "PACK TOOLS" },
-    nudgeSections: { efficiencyNote: "PACK NOTE" },
-    toolPrompts: { compress: { description: "PACK DESC", paramDescriptions: { startId: "pack-start", endId: "pack-end" } } },
-    delegatePrompt: "PACK DELEGATE",
-    prompts: { compressPhilosophy: "PACK PHILO" },
-  });
+  const pack: Pack = {
+    name: "t",
+    source: "test",
+    surface: {
+      prompts: { compressPhilosophy: "PACK PHILO" },
+      nudgeSections: { efficiencyNote: "PACK NOTE" },
+      toolPrompts: { compress: { description: "PACK DESC", paramDescriptions: { startId: "pack-start", endId: "pack-end" } } },
+      adapters: {
+        pi: {
+          promptSections: { acpTags: "PACK TAGS", tools: "PACK TOOLS" },
+          toolExtras: { compress: { promptSnippet: "PACK SNIP", promptGuidelines: ["pack-g"] } },
+          delegatePrompt: "PACK DELEGATE",
+        },
+      },
+    },
+  };
   const merged = mergeSurface(pack, {
     promptSections: { acpTags: null },
     toolPrompts: { compress: { paramDescriptions: { startId: "inline-start" } } },
@@ -122,6 +152,8 @@ test("mergeSurface: inline wins per field, pack fills the rest", () => {
   assert.equal((merged.promptSections as Record<string, unknown>).tools, "PACK TOOLS");
   assert.equal((merged.nudgeSections as Record<string, unknown>).efficiencyNote, "PACK NOTE");
   assert.equal(merged.toolPrompts.compress?.description, "PACK DESC");
+  assert.equal(merged.toolPrompts.compress?.promptSnippet, "PACK SNIP");
+  assert.deepEqual(merged.toolPrompts.compress?.promptGuidelines, ["pack-g"]);
   assert.equal(merged.toolPrompts.compress?.paramDescriptions?.startId, "inline-start");
   assert.equal(merged.toolPrompts.compress?.paramDescriptions?.endId, "pack-end");
   assert.equal(merged.delegatePrompt, "PACK DELEGATE");
@@ -129,24 +161,38 @@ test("mergeSurface: inline wins per field, pack fills the rest", () => {
 });
 
 test("mergeSurface: inline delegatePrompt (incl. null) beats pack", () => {
-  const pack = packSurface({ delegatePrompt: "PACK DELEGATE" });
+  const pack: Pack = { name: "t", source: "test", surface: { adapters: { pi: { delegatePrompt: "PACK DELEGATE" } } } };
   assert.equal(mergeSurface(pack, {}).delegatePrompt, "PACK DELEGATE");
   assert.equal(mergeSurface(pack, { delegatePrompt: "INLINE" }).delegatePrompt, "INLINE");
   assert.equal(mergeSurface(pack, { delegatePrompt: null }).delegatePrompt, null);
 });
 
-test("packSurface sanitizes junk: bad types dropped, only 4 rule keys kept for prompts", () => {
-  const s = packSurface({
-    prompts: { compressPhilosophy: "ok", bogus: "x", howToCompressRules: 7 },
-    promptSections: { acpTags: 42, tools: null },
-    nudgeSections: { t2Guidance: "t" },
-    toolPrompts: { bash: { description: "nope" } },
-    delegatePrompt: "D",
+test("piAdapterSurface sanitizes junk: bad section types dropped, malformed extras dropped", () => {
+  const pack: Pack = {
+    name: "t",
+    source: "test",
+    surface: {
+      adapters: {
+        pi: {
+          promptSections: { acpTags: 42, tools: null, whenToCompress: "keep", philosophy: "no" },
+          toolExtras: {
+            compress: { promptSnippet: 7, promptGuidelines: "single" },
+            bash: { promptSnippet: "nope" },
+            acp_status: { promptSnippet: "s", promptGuidelines: [1, "ok"] },
+            decompress: { promptGuidelines: ["fine"] },
+          },
+          delegatePrompt: "D",
+        },
+      },
+    },
+  };
+  const s = piAdapterSurface(pack);
+  assert.deepEqual(s.promptSections, { tools: null, whenToCompress: "keep" });
+  assert.deepEqual(s.toolExtras, {
+    compress: { promptGuidelines: ["single"] },
+    acp_status: { promptSnippet: "s" },
+    decompress: { promptGuidelines: ["fine"] },
   });
-  assert.deepEqual(s.prompts, { compressPhilosophy: "ok" });
-  assert.deepEqual(s.promptSections, { tools: null });
-  assert.deepEqual(s.nudgeSections, { t2Guidance: "t" });
-  assert.deepEqual(s.toolPrompts, {});
   assert.equal(s.delegatePrompt, "D");
 });
 
@@ -170,6 +216,32 @@ test("readToolSurfaceWithPacks applies base pack under inline (per-field, per-pa
     assert.deepEqual(out.compress?.promptGuidelines, []);
     assert.equal(out.decompress?.promptSnippet, "");
   } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("readToolSurfaceWithPacks: home config fills, cwd config wins", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "acp-home-"));
+  const dir = await mkdtemp(path.join(tmpdir(), "acp-cwd-"));
+  const oldHome = process.env.HOME;
+  try {
+    process.env.HOME = home;
+    await mkdir(path.join(home, ".pi"), { recursive: true });
+    await writeFile(path.join(home, ".pi/acp.json"), JSON.stringify({ toolPrompts: { compress: { promptSnippet: "home-snip", description: "HOME DESC" } } }), "utf8");
+    await mkdir(path.join(dir, ".pi"), { recursive: true });
+    await writeFile(path.join(dir, ".pi/acp.json"), JSON.stringify({ compress: { promptPack: "default" } }), "utf8");
+    let out = readToolSurfaceWithPacks(dir);
+    assert.equal(out.compress?.promptSnippet, "home-snip");
+    assert.equal(out.compress?.description, "HOME DESC");
+
+    await writeFile(path.join(dir, ".pi/acp.json"), JSON.stringify({ toolPrompts: { compress: { description: "CWD DESC" } } }), "utf8");
+    out = readToolSurfaceWithPacks(dir);
+    assert.equal(out.compress?.description, "CWD DESC");
+    assert.equal(out.compress?.promptSnippet, undefined);
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    await rm(home, { recursive: true, force: true });
     await rm(dir, { recursive: true, force: true });
   }
 });
