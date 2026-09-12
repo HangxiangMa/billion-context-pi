@@ -574,6 +574,13 @@ The flow is:
 
    **Strict-echo thinking upstreams (auto-disabled).** A few thinking-mode providers reject a rebuilt request with HTTP 400 (`The \`reasoning_content\` ... must be passed back to the API`) once a closed-round assistant message loses its reasoning. The adapter detects **DeepSeek** statically — the model's `baseUrl` or provider name contains `deepseek` (case-insensitive) — and forces `drop: false` for that model automatically, overriding an explicit `drop: true` for safety. This is cost-free for non-thinking DeepSeek models, which emit no `thinking` parts to drop. Strict-echo providers **not** on a `deepseek` host — GLM-thinking, QwQ, self-hosted DeepSeek mirrors — are deliberately not auto-detected (that would disable the pass for their non-thinking models); use the per-provider override above for those. Twin fixes: proxy-side billion-context#690 and kernel-side fold atomicity acp-kernel#245 (shipped in acp-kernel 0.0.63); tracked in [#361](https://github.com/ranxianglei/billion-context-pi/issues/361).
 
+### `compress.promptPack`
+
+- **Type:** `string` — pack name (`[A-Za-z0-9][A-Za-z0-9._-]*`, no path separators)
+- **Default:** `"default"`
+- **Status:** 🟢 ACTIVE
+- **Description:** Selects a **prompt pack** — a named bundle of surface overrides (prompt sections, nudge sections, tool prompts, delegate prompt, compression rules) applied as the base layer under your inline `acp.json` overrides. Resolved through the same three-level cascade as every other `compress.*` field: `models > providers > global`, per active model, per turn. See [Prompt Packs](#prompt-packs) for the full reference and the built-in `lean` pack.
+
 ### `compress.providers` — per-provider & per-model overrides
 
 - **Type:** object — a map of provider name → `{ ...<compress fields>, models: { modelId → <compress fields> } }`
@@ -704,6 +711,91 @@ The `prompts` object overrides acp-kernel's **load-bearing** compression prompt 
   ```json
   { "delegatePrompt": "Background task results arrive as system notifications — read the result file if relevant." }
   ```
+
+---
+
+## Prompt Packs
+
+A **prompt pack** is a named JSON file bundling surface overrides — prompt sections, nudge sections, tool prompts, the delegate prompt, and the four load-bearing compression rules — so you can switch a model's entire ACP surface with one line instead of pasting a block of `promptSections`/`toolPrompts` JSON into `acp.json`:
+
+```json
+{ "compress": { "promptPack": "lean" } }
+```
+
+Pack selection rides the standard `compress` three-level cascade (`models > providers > global`, deepest-wins per turn), so different models can use different packs with zero extra config plumbing:
+
+```json
+{ "compress": { "providers": { "zhipu": { "promptPack": "lean" } } } }
+```
+
+### Discovery order
+
+For pack name `N`, the first match wins:
+
+1. `<project>/.pi/acp/packs/N.json` — project-local (checked last, wins — shadows both)
+2. `~/.pi/acp/packs/N.json` — user-global
+3. Built-in packs: `default`, `lean`
+
+Names must match `[A-Za-z0-9][A-Za-z0-9._-]*` (no `..`, no path separators); invalid names and unreadable/invalid-JSON files fall back to built-ins — the adapter never crashes on a bad pack.
+
+### Pack file schema
+
+```jsonc
+{
+  "name": "my-pack",              // informational
+  "version": "1.0.0",             // informational
+  "description": "...",           // informational
+  "prompts": {                     // the 4 load-bearing rule strings (RISK-GATED, see below)
+    "compressPhilosophy": "...",
+    "howToCompressRules": "...",
+    "tier2DistillRules": "...",
+    "tier3CondenseRules": "..."
+  },
+  "promptSections": { "acpTags": "...", "tier2": null },   // same schema as acp.json promptSections
+  "nudgeSections": { "efficiencyNote": "..." },             // same schema as acp.json nudgeSections
+  "toolPrompts": { "compress": { "description": "..." } }, // same schema as acp.json toolPrompts
+  "delegatePrompt": "..."          // string replaces, null removes
+}
+```
+
+Every field is optional; each uses the same sanitizer as its `acp.json` counterpart, and every key in each section is tri-state (`string` replaces, `null` deletes, absent keeps the pack/built-in value).
+
+### Merge semantics — pack base, inline wins
+
+The effective surface for a turn = **pack defaults ⊕ inline `acp.json` overrides**, field by field:
+
+- `promptSections` / `nudgeSections`: inline key beats pack key (including `null`).
+- `toolPrompts`: per-tool, then per-field (`description`, `promptSnippet`, `promptGuidelines`), then per-param inside `paramDescriptions`.
+- `delegatePrompt`: inline wins if present (including `null`).
+
+### Programmatic sources (hosts & future installers)
+
+The discovery chain is itself pluggable. A **pack source** is anything implementing:
+
+```ts
+interface PackSource {
+  id: string;
+  resolve(name: string): Pack | null;  // sanitized surface + provenance tag
+  list?(): Pack[];                       // optional, powers pack listings
+}
+```
+
+Built-in packs, directory packs, and any managed registry all flow through one `createPackResolver([...sources])` — first match wins, so a **prepended source shadows everything**. That is the intended integration point for a future `bili-pi install`-style pack manager: write pack files into the user dir (zero code), or register a managed source ahead of the defaults — no core changes either way. Hosts embedding the adapter can build their own resolver and pass it to `resolveActivePack`.
+
+### Risk gating
+
+A pack's `prompts` block overrides the compression rule strings, exactly like inline `prompts` — so it is gated by the same [`acknowledgePromptsRisk`](#acknowledgepromptsrisk) switch. Without that flag set in `acp.json`, the pack's `prompts` block is ignored (everything else in the pack still applies); a warning is logged. The flag cannot be shipped inside a pack — it must be an explicit local choice.
+
+### Built-in packs
+
+| Name | Purpose |
+|------|---------|
+| `default` | No overrides — the full built-in surface. |
+| `lean` | Token-lean surface: one compact system-prompt block + one-line tool descriptions, no snippets/guidelines (≈76% smaller surface than `default` — measured 5422→1312 bytes). Compression rules stay kernel defaults, delivered by nudges on demand. Adapted from the community investigation in [#410](https://github.com/ranxianglei/billion-context-pi/issues/410). |
+
+### `lean` details
+
+The `lean` pack nulls every system-prompt section except a single `acpTags` block of eight one-line rules (refs, what to compress, what to preserve verbatim, recall tools, renumbering recovery, decompress-to-file, throttle resume, summaries-are-history), blanks all four tools' `promptSnippet`/`promptGuidelines`, and replaces their `description`s with one-liners. Everything not overridden — compression philosophy, tier rules, nudge text — remains at built-in defaults. Best for small models that copy tool schemas verbatim into their answers, or when you want maximum coding tokens back. To experiment: `{ "compress": { "promptPack": "lean" } }`.
 
 ---
 

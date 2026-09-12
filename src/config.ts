@@ -137,6 +137,13 @@ export interface CompressSettings {
    *  tool calls — see CompressReasoningConfig in src/reasoning-drop.ts.
    *  Merged field-wise (drop, threshold) across the three levels. */
   reasoning?: CompressReasoningConfig;
+  /** Active prompt pack name (see CONFIGURATION.md “Prompt packs”). Base
+   *  level; override per provider/model via `providers`. "default" or unset =
+   *  built-in defaults. Resolved per request against the live model, so
+   *  switching models mid-session switches the pack. Packs ship text-level
+   *  overrides only; a pack's `toolPrompts` follow the base selection (tool
+   *  definitions freeze at extension load, before the model is known). */
+  promptPack?: string;
 }
 
 /** Per-provider compression overrides. Carries the same tuning fields as the
@@ -439,6 +446,7 @@ export function mergeCompress(
       drop: model?.reasoning?.drop ?? provider?.reasoning?.drop ?? global?.reasoning?.drop,
       threshold: model?.reasoning?.threshold ?? provider?.reasoning?.threshold ?? global?.reasoning?.threshold,
     },
+    promptPack: model?.promptPack ?? provider?.promptPack ?? global?.promptPack,
   };
 }
 
