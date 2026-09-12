@@ -4,6 +4,7 @@ import { mkdir, rm, writeFile, readFile } from "node:fs/promises";
 import * as path from "node:path";
 import { createAcpExtension } from "../src/index.js";
 import { listSessions, exportSession, parseExportArgs } from "../src/export.js";
+import { isCompressSuccessText } from "../src/compress-tool.js";
 import { createInitialState } from "acp-kernel";
 
 function captureApi() {
@@ -86,7 +87,7 @@ async function setupSession(stateFile: string) {
     ctx,
   );
   const text = (res.content[0] as any).text as string;
-  assert.match(text, /blocks: b1=m00002/, "compress created a block");
+  assert.ok(isCompressSuccessText(text), `compress created a block: ${text}`);
   return { api, ctx, notifies };
 }
 
