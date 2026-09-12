@@ -4,13 +4,13 @@ import type {
   ExtensionFactory,
   SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
-import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME } from "./config-dir.js";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
 import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges } from "acp-kernel";
-import { type AdapterConfig, resolveDelegate, DEFAULT_DELEGATE_POLICY } from "./config.js";
+import { type AdapterConfig, resolveDelegate, resolveHostSession, DEFAULT_DELEGATE_POLICY } from "./config.js";
 import { createRuntime, type AcpRuntime } from "./runtime.js";
 import { makeCompressTool, isCompressSuccessText, isCompressNoopText } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
@@ -26,7 +26,8 @@ import { delegateStatusWidget } from "./fleet-widget.js";
 import { openFleetInspector } from "./fleet-inspector.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
-import { collectCoveredMessageIds, estimateTokens, lastUserMessageId, collectImageTokens, modelSupportsImages, sentViewTokenCount } from "./tokens.js";
+import { collectCoveredMessageIds, estimateTokens, collectImageTokens, modelSupportsImages, sentViewTokenCount } from "./tokens.js";
+import { lastTurnBoundaryId, lastTurnBoundaryIndex } from "./turn-boundary.js";
 import { usageAnchorPredatesCompression } from "./floor-stale.js";
 import { checkForUpdate } from "./update.js";
 import {
@@ -41,8 +42,17 @@ import {
 import { defaultCountTokens } from "acp-kernel";
 import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
 import { applyOutputHeadroom, inspectOverflowMessage, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
-import { isOmpHost, OMP_UNSUPPORTED_MESSAGE } from "./omp.js";
+import { UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
+import { isUnsupportedHost } from "./host.js";
 import { isBiliProxyBaseUrl, PROXY_STAND_DOWN_MESSAGE } from "./proxy-detect.js";
+
+// Host-facing API for multi-session hosts (docs/host-adapter.md, #367): the
+// extension keeps its own runtime instance private; hosts build their own via
+// createRuntime — derivation works across instances because it only touches
+// on-disk sidecars through session refs.
+export { createRuntime } from "./runtime.js";
+export type { AcpRuntime, SessionRef } from "./runtime.js";
+export { deriveChildState } from "./state.js";
 
 type AgentMessage = SessionMessageEntry["message"];
 
@@ -158,20 +168,23 @@ function wireDelegateReadTracking(pi: ExtensionAPI): void {
 function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIfProxied: (ctx: ExtensionContext) => boolean): void {
   let ompWarned = false;
   pi.on("session_start", async (_event, ctx) => {
-    // OMP (oh-my-pi) is not supported: its in-process live-entries integration
-    // diverges the nudge's example refs from the session's real refs, so
-    // compress calls fail with "does not exist in this session". Stand down —
-    // refuse service and point the user at the billion-context proxy. session_start
-    // always precedes the first context/before_agent_start event, so setting
-    // `refused` here reliably gates every downstream handler for the session.
-    if (isOmpHost(ctx.sessionManager)) {
+    // Unsupported hosts stand down (#234 / #364): any host without Pi's
+    // buildContextEntries() API is refused unless it declared itself a
+    // Pi-compatible fork via PI_ACP_FORK_HOST=1. OMP (oh-my-pi) stays blocked
+    // by default — its in-process live-entries integration diverges the nudge's
+    // example refs from the session's real refs, so compress calls fail with
+    // "does not exist in this session". Refuse service and point the user at
+    // the fork opt-in or the billion-context proxy. session_start always
+    // precedes the first context/before_agent_start event, so setting `refused`
+    // here reliably gates every downstream handler for the session.
+    if (isUnsupportedHost(ctx.sessionManager)) {
       runtime.refused = true;
       if (!ompWarned) {
         ompWarned = true;
         const sid = ctx.sessionManager.getSessionId();
-        logWarn("host", { event: "omp-unsupported", sid, action: "refused" });
-        if (ctx.hasUI) ctx.ui.notify(OMP_UNSUPPORTED_MESSAGE, "warning");
-        else console.error(OMP_UNSUPPORTED_MESSAGE);
+        logWarn("host", { event: "host-unsupported", sid, action: "refused" });
+        if (ctx.hasUI) ctx.ui.notify(UNSUPPORTED_HOST_MESSAGE, "warning");
+        else console.error(UNSUPPORTED_HOST_MESSAGE);
       }
       return;
     }
@@ -464,7 +477,10 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     }
     const debugOn = debug.enabled;
 
-    const turnKey = lastUserMessageId(entries) ?? sid;
+    // #364: one policy for all turn-boundary decisions this event (turnKey +
+    // outcome scoping); default-off keeps pi-native boundaries.
+    const turnPolicy = resolveHostSession(runtime.adapter);
+    const turnKey = lastTurnBoundaryId(entries, turnPolicy) ?? sid;
 
     // Compress-outcome tracking feeds ONLY the nudge circuit breaker below:
     // failed/no-op attempts are counted (capped at MAX_COMPRESS_ATTEMPTS per
@@ -476,7 +492,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     // CURRENT user turn are considered; processed BEFORE the nudge block so
     // the cap suppression sees the newest outcome (a success on this fire
     // must lift the cap on this same fire).
-    const compressOutcomes = collectCompressOutcomes(entries, turnStartIndex(entries));
+    const compressOutcomes = collectCompressOutcomes(entries, lastTurnBoundaryIndex(entries, turnPolicy));
     const outcome = compressOutcomes.length > 0 ? runtime.noteCompressOutcomes(sid, turnKey, compressOutcomes) : null;
 
     // Growth-aware re-inject bookkeeping (issue #269) runs on EVERY context
@@ -732,16 +748,6 @@ function collectOriginals(entries: Array<{ type: string; id: string; message?: A
     }
   }
   return map;
-}
-
-// Index of the last user-role entry — the start of the current turn.
-// Everything strictly AFTER this index belongs to the current turn; -1 when
-// the session has no user message yet.
-function turnStartIndex(entries: Array<{ type: string; message?: { role?: string } }>): number {
-  for (let i = entries.length - 1; i >= 0; i--) {
-    if (entries[i]!.message?.role === "user") return i;
-  }
-  return -1;
 }
 
 // Compress toolResults from the CURRENT user turn only — the raw material for

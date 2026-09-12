@@ -105,6 +105,7 @@ All keys below are currently **ACTIVE**.
 | `throttleRetry` | boolean \| object | `true` | 🟢 ACTIVE | Auto-retry provider token rate-limit errors with progressive backoff. |
 | `repetitionGuard` | boolean \| object | `true` | 🟢 ACTIVE | Break infinite loops of byte-identical tool calls (warn at 3 consecutive, block + abort at 5). |
 | `degenerationGuard` | boolean \| object | `true` | 🟢 ACTIVE | Collapse degenerate single-codepoint runs (e.g. 4655×「【」) in assistant text/thinking of the outgoing view and inject a one-shot recovery notice — breaks the abort loop where pi replays degenerated thinking back to the provider on every request (#351). |
+| `hostSession` | boolean \| object | `false` | 🟢 ACTIVE | Turn-boundary policy for multi-session hosts: count injected `custom_message` entries as turn starts. Off by default (pi-native behavior). |
 
 **Delegate keys**
 
@@ -164,6 +165,7 @@ All keys below are currently **ACTIVE**.
 | `ACP_MODEL_CONTEXT_LIMIT` | Override the context limit (takes highest precedence). |
 | `ACP_DEBUG` | Set to `1` / `true` to enable debug logging. |
 | `ACP_LOG_FILE` | Override the log file path (default `~/.pi/acp.log`). |
+| `PI_ACP_FORK_HOST` | Set to `1` / `true` to declare a Pi-compatible fork host (no `buildContextEntries()`) as supported. OMP stays refused by default. See [docs/host-adapter.md](./docs/host-adapter.md). |
 | `PI_ACP_DELEGATE_MAX_DEPTH` | Override `delegate.maxDepth`. |
 | `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES` | Override `delegate.syncTimeoutMinutes`; `0` disables the sync hard timeout. |
 | `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES` | Override `delegate.idleTimeoutMinutes`; `0` disables the idle watchdog. |
@@ -482,6 +484,38 @@ Tool-call arguments are never rewritten (rewriting them would desync the model's
 - **Default:** `200`
 - **Status:** 🟢 ACTIVE
 - **Description:** Minimum length of a single-codepoint run (counted in codepoints, surrogate-pair safe) before it is treated as degeneration. Legitimate runs in coding sessions (markdown hrules, dotted leaders) stay well below this; observed pre-degeneration drift maxed at ~60 before the catastrophic 4655 run. Values below 8 are raised to 8 (keeps the collapse marker itself re-scan safe); invalid values fall back to 200 with a logged warning.
+
+---
+
+## Host Multi-Session
+
+The `hostSession` key controls **turn-boundary detection** for hosts that run several sessions inside one process (e.g. Prime with inline RLM sub/sibling sessions). The full contract — including child-session state derivation (`deriveChildState`) — is documented in **[docs/host-adapter.md](./docs/host-adapter.md)**.
+
+**Background.** ACP's per-turn ledgers (nudge-shown tracking, compress retry caps, outcome scoping) are keyed by the start of the current *turn*. Under Pi-native semantics a turn starts only at a genuine user-role message. Inline multi-session hosts additionally inject agent turns into the session log as `custom_message` entries; those are projected into LLM context (Pi-native semantics) but — under the default policy — start no turn, so several real host turns collapse into one turn key: nudge cadence cells misalign and retry-cap/throttle cycle statistics distort. Every turn-boundary decision in the adapter goes through the single predicate `isTurnBoundary(entry, policy)` (`src/turn-boundary.ts`).
+
+### `hostSession`
+
+- **Type:** boolean \| object
+- **Default:** `false` (off)
+- **Status:** 🟢 ACTIVE
+- **Description:** Turn-boundary policy for host-injected messages. `hostSession: true` is shorthand for `{ "countCustomMessages": true }`. Object form (any subset):
+
+  ```json
+  {
+    "hostSession": {
+      "countCustomMessages": true
+    }
+  }
+  ```
+
+  **Default-off keeps existing single-session behavior byte-for-byte** — enable this only if your host actually injects agent turns into session logs.
+
+### `hostSession.countCustomMessages`
+
+- **Type:** boolean
+- **Default:** `false`
+- **Status:** 🟢 ACTIVE
+- **Description:** Count host-injected `custom_message` entries with non-empty text (except UI-only `acp-status` panels) as turn boundaries for all per-turn ledgers; empty injections are pure control signals and start no turn. Does not change LLM-context projection — those entries were already projected as user-role messages under Pi-native semantics.
 
 ---
 
