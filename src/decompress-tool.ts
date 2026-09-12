@@ -1,6 +1,7 @@
 import { Type, type Static } from "typebox";
 import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
+import { applyToolPromptOverrides, type ToolPromptOverrides } from "./surface.js";
 import { debug, logError, logInfo, logThrow } from "./log.js";
 import { parseBlockIdArg, collectBlockContent, type CompressionBlock } from "acp-kernel";
 import { entriesToCoreMessages } from "./messages.js";
@@ -31,8 +32,8 @@ const DecompressParams = Type.Object({
 
 type DecompressArgs = Static<typeof DecompressParams>;
 
-export function makeDecompressTool(runtime: AcpRuntime): ToolDefinition<typeof DecompressParams> {
-  return {
+export function makeDecompressTool(runtime: AcpRuntime, overrides?: ToolPromptOverrides): ToolDefinition<typeof DecompressParams> {
+  return applyToolPromptOverrides({
     name: "decompress",
     label: "Decompress",
     description:
@@ -56,7 +57,7 @@ export function makeDecompressTool(runtime: AcpRuntime): ToolDefinition<typeof D
       }
       return { details: undefined, content: [{ type: "text", text: result }] };
     },
-  };
+  }, overrides);
 }
 
 /** Allowed roots for toFile paths. Keeps user-supplied paths from escaping to

@@ -1,6 +1,7 @@
 import { Type, type Static } from "typebox";
 import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
+import { applyToolPromptOverrides, type ToolPromptOverrides } from "./surface.js";
 import { buildStatusReport, defaultCountTokens, formatRanges, viableRanges } from "acp-kernel";
 import { estimateTokens, collectCoveredMessageIds, collectImageTokens, modelSupportsImages, adjustedTokenCount } from "./tokens.js";
 import { usageAnchorPredatesCompression } from "./floor-stale.js";
@@ -21,8 +22,8 @@ const StatusParams = Type.Object({
 
 type StatusArgs = Static<typeof StatusParams>;
 
-export function makeStatusTool(runtime: AcpRuntime): ToolDefinition<typeof StatusParams> {
-  return {
+export function makeStatusTool(runtime: AcpRuntime, overrides?: ToolPromptOverrides): ToolDefinition<typeof StatusParams> {
+  return applyToolPromptOverrides({
     name: "acp_status",
     label: "ACP Status",
     description:
@@ -45,7 +46,7 @@ export function makeStatusTool(runtime: AcpRuntime): ToolDefinition<typeof Statu
       }
       return { details: undefined, content: [{ type: "text", text: result }] };
     },
-  };
+  }, overrides);
 }
 
 async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: ExtensionContext): Promise<string> {

@@ -2,6 +2,8 @@ import { defaultConfig, type Config, type Prompts } from "acp-kernel";
 import type { CompressReasoningConfig } from "./reasoning-drop.js";
 import type { DegenerationGuardConfig } from "./degeneration.js";
 import type { ThrottleRetryConfig } from "./throttle-retry.js";
+import type { PiPromptSections } from "./system-prompt.js";
+import type { NudgeSectionsConfig, ToolPromptsConfig } from "./surface.js";
 import { logWarn } from "./log.js";
 
 /** Per-role delegate defaults. Lets long-lived automation pin a cheaper or
@@ -271,6 +273,21 @@ export interface AdapterConfig {
    *  replacing the kernel's tuned compression rules may reduce summary quality
    *  (lost paths/signatures/decisions → worse retrieval). */
   acknowledgePromptsRisk?: boolean;
+  /** Override structural sections of the ACP system prompt (ACP TAGS, TOOLS,
+   *  WHEN TO COMPRESS, ...). Tri-state per section: string = replace, null =
+   *  remove, omitted = default. Not risk-gated — these are documentation
+   *  sections, not compression rules. Set via acp.json. */
+  promptSections?: Partial<PiPromptSections>;
+  /** Override guidance-class nudge texts (efficiencyNote, emergencyHeader,
+   *  t2Guidance, t3Guidance). Same tri-state semantics. Not risk-gated. */
+  nudgeSections?: NudgeSectionsConfig;
+  /** Override the four ACP tool definitions' LLM-facing text (description,
+   *  paramDescriptions, promptSnippet, promptGuidelines). Read synchronously
+   *  at extension load — tool defs are frozen at registration time. */
+  toolPrompts?: ToolPromptsConfig;
+  /** Replace (string) or remove (null) the ACP_DELEGATE_NOTIFICATIONS appendix
+   *  injected when the delegate tool is enabled. */
+  delegatePrompt?: string | null;
   coreOverrides?: Partial<Config>;
 }
 

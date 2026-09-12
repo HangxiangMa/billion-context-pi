@@ -18,6 +18,7 @@ import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage, setDelegatePolicy, setDelegateDefaults, setDelegateNotifyIfRead, markDelegateResultRead, markDelegateRunReadByCommand } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
+import { readToolSurfaceSync, type NudgeSectionsConfig } from "./surface.js";
 import { coreOutToAgentMessages, extractText } from "./messages.js";
 import { countThinkingChars, dropCompressReasoning } from "./reasoning-drop.js";
 import { collapseAssistantDegeneration, degenerationNotice, lastAssistantRuns, resolveDegenerationGuard } from "./degeneration.js";
@@ -98,10 +99,11 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     wireToolGuardrails(pi, runtime);
     wireOverflowSelfHeal(pi, runtime);
     wireThrottleRetry(pi, runtime);
-    pi.registerTool(makeCompressTool(runtime));
-    pi.registerTool(makeDecompressTool(runtime));
-    pi.registerTool(makeSearchTool(runtime));
-    pi.registerTool(makeStatusTool(runtime));
+    const toolSurface = readToolSurfaceSync(process.cwd());
+    pi.registerTool(makeCompressTool(runtime, toolSurface.compress));
+    pi.registerTool(makeDecompressTool(runtime, toolSurface.decompress));
+    pi.registerTool(makeSearchTool(runtime, toolSurface.search_context));
+    pi.registerTool(makeStatusTool(runtime, toolSurface.acp_status));
     for (const { name, options } of makeCommands(runtime, pi)) {
       pi.registerCommand(name, options);
     }
@@ -414,7 +416,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
         prunedMsgs: coreMessages.length - turn.messages.length + turn.messages.filter((m) => m.id.startsWith("acp_summary")).length,
         nudgeShouldInject: turn.nudge?.shouldInject ?? false,
         nudgeReason: turn.nudge?.reason ?? null,
-        nudgeVoice: turn.nudge ? renderNudgeText(turn.nudge, runtime.prompts).voice : null,
+        nudgeVoice: turn.nudge ? renderNudgeText(turn.nudge, runtime.prompts, runtime.adapter.nudgeSections).voice : null,
       nudgePct: turn.nudge ? Math.round(turn.nudge.contextUsage * 100) : null,
       nudgeTier: turn.nudge?.tier ?? null,
       nudgeCompressibleCount: turn.nudge?.compressibleRanges.length ?? 0,
@@ -561,8 +563,8 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       const reInjectReady = shownAt === undefined || tokenCount - shownAt >= reInjectFloor;
       const alreadyShown = retryCapped || (!emergency && runtime.nudgeShownFor(sid, turnKey) && !reInjectReady);
       if (!alreadyShown) {
-        rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active), runtime.prompts));
-        const rendered = renderNudgeText(turn.nudge, runtime.prompts);
+        rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active), runtime.prompts, runtime.adapter.nudgeSections));
+        const rendered = renderNudgeText(turn.nudge, runtime.prompts, runtime.adapter.nudgeSections);
         const top = [...turn.nudge.compressibleRanges].sort((a, b) => b.tokens - a.tokens)[0];
         const example = top ? `\n\nExample: compress({ content: [{ startId: "${top.startRef}", endId: "${top.endRef}", summary: "..." }] })` : "";
         if (emergency) {
@@ -615,8 +617,10 @@ function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
     // not learn about compress/decompress on a host where they can't work.
     if (runtime.refused) return;
     const delegate = resolveDelegate(runtime.adapter).enabled;
-    const acp = buildAcpSystemPrompt(runtime.prompts);
-    const prompt = delegate ? `${acp}\n${ACP_DELEGATE_PROMPT}` : acp;
+    const acp = buildAcpSystemPrompt(runtime.prompts, runtime.adapter.promptSections);
+    const delegateOverride = runtime.adapter.delegatePrompt;
+    const delegateText = delegateOverride !== undefined ? delegateOverride : ACP_DELEGATE_PROMPT;
+    const prompt = delegate && delegateText !== null ? `${acp}\n${delegateText}` : acp;
     return { systemPrompt: formatSystemPromptForEvent(event.systemPrompt, prompt) };
   });
 }
@@ -767,8 +771,8 @@ function collectCompressOutcomes(entries: Array<{ type: string; id: string; mess
   return out;
 }
 
-function nudgeMessage(nudge: NudgeDecision, blocks: CompressionBlock[], prompts: Prompts): AgentMessage {
-  const rendered = renderNudgeText(nudge, prompts);
+function nudgeMessage(nudge: NudgeDecision, blocks: CompressionBlock[], prompts: Prompts, sections?: NudgeSectionsConfig): AgentMessage {
+  const rendered = renderNudgeText(nudge, prompts, sections);
   const lines = [rendered.text];
 
   if (blocks.length > 0) {
