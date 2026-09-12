@@ -86,12 +86,18 @@ test("compress beforeTokens is the raw CJK-aware estimate", async () => {
 // block's summary anchor plus ref-tag overhead. Regressing to the raw
 // projection (no summaries, no tags) would over-claim reclaimed by the
 // cumulative summary mass of all blocks, exactly in long sessions.
+// issue #378: every range must clear the kernel's minCompressRange gate
+// (default 5000 chars) — the old sub-gate payloads were rejected outright and
+// every scale assertion below passed vacuously on a no-op panel (646 → 646).
+// Hence 6000-CJK-char entries + preserveRecentMessages:1 (#309/#322 pattern),
+// plus explicit proof that compression really happened before the scale checks.
 test("compress afterTokens is measured on the same sent-view scale as beforeTokens (multi-block)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
   const stateFile = "/tmp/pai-acp-compress-scales.session.json";
   await rm(`${stateFile}.acp.json`, { force: true });
-  const entries = [userMsg("e1", "hello world"), userMsg("e2", ZH), userMsg("e3", ZH2), userMsg("e4", ZH2)];
+  const big = "中".repeat(6000); // clears minCompressRange (default 5000 chars)
+  const entries = [userMsg("e1", big), userMsg("e2", big), userMsg("e3", big), userMsg("e4", big)];
   const ctx = fakeCtx(entries, stateFile);
   ctx.__setUsage(100_000);
   await runContextRound(handlers, ctx); // prime the context round
@@ -102,8 +108,17 @@ test("compress afterTokens is measured on the same sent-view scale as beforeToke
     return typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
   }
 
-  await doCompress("tc1", { startId: "m00001", endId: "m00001", summary: "first block" });
-  const text = await doCompress("tc2", { startId: "m00003", endId: "m00003", summary: "second block" });
+  const first = await doCompress("tc1", { startId: "m00001", endId: "m00001", summary: "中".repeat(300) });
+  const text = await doCompress("tc2", { startId: "m00003", endId: "m00003", summary: "文".repeat(300) });
+
+  assert.ok(first.includes("▣ ACP") && !first.includes("Errors:"), `tc1 not compressed — guard would be vacuous: ${first}`);
+  assert.ok(text.includes("▣ ACP") && !text.includes("Errors:"), `tc2 not compressed — guard would be vacuous: ${text}`);
+  const stored = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  const blocks = stored.blocks as any[];
+  assert.equal(blocks.length, 2, "both compressions must have created stored blocks");
+  for (const b of blocks) {
+    assert.ok(typeof b.summary === "string" && b.summary.length > 0, `block ${b.blockId} missing stored summary`);
+  }
 
   const m = /▣ ACP \| (\d+(?:\.\d+)?)(K?) → (\d+(?:\.\d+)?)(K?) tokens \(~(\d+(?:\.\d+)?)(K?) reclaimed/.exec(text);
   assert.ok(m, `no ACP line in output: ${text}`);
@@ -112,14 +127,15 @@ test("compress afterTokens is measured on the same sent-view scale as beforeToke
   const after = toTok(m![3]!, m![4]);
   const reclaimed = toTok(m![5]!, m![6]);
 
-  // Visible-only (e2+e4) = 450. The true post-compression sent view adds the
-  // two summary anchors + tag overhead (~60) → afterTokens ≥ 480; a raw
-  // projection regression would report ~450.
-  assert.ok(after >= 480, `afterTokens ${after} missing the summary-anchor scale (raw projection would be ~450): ${text}`);
-  // True freed ≈ removed e3 (150) + tag delta − new summary (~170); a raw
-  // afterTokens would over-claim by block-1 summary + tags (~220).
-  assert.ok(reclaimed <= 180, `reclaimed ${reclaimed} over-claimed (raw afterTokens would be ~220): ${text}`);
-  assert.equal(before - after, reclaimed, "reclaimed consistent with the arrow");
+  // Visible-only (e2+e4) = 12000. The true sent view adds both blocks' summary
+  // anchors (~300 each incl. tag overhead) → afterTokens ≈ 12600; a raw
+  // projection regression reports 12000.
+  assert.ok(after >= 12300, `afterTokens ${after} missing the summary-anchor scale (raw projection reports 12000): ${text}`);
+  // True freed ≈ removed e3 (6000) − new summary anchor (~300) → ~5700; a raw
+  // afterTokens over-claims by BOTH blocks' anchor mass (~6300).
+  assert.ok(reclaimed <= 6000, `reclaimed ${reclaimed} over-claimed (raw afterTokens reports ~6300): ${text}`);
+  // formatK rounds each figure into a 100-token bucket → allow combined slack.
+  assert.ok(Math.abs(before - after - reclaimed) <= 150, `panel internally inconsistent: ${before} → ${after} (~${reclaimed} reclaimed)`);
 });
 
 // issue #309: a model that emits double-escaped summaries (literal \uXXXX runs
