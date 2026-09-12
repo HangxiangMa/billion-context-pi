@@ -155,6 +155,10 @@
 |----|------|--------|------|------|
 | `prompts` | object | *(内核默认)* | 🟢 ACTIVE | 覆盖 acp-kernel 的 4 条承重压缩提示词规则。每个设置的字段逐字替换默认值。 |
 | `acknowledgePromptsRisk` | boolean | `false` | 🟢 ACTIVE | 必须为 `true`，`prompts` 覆盖才会生效；否则覆盖被丢弃、使用默认值。 |
+| `promptSections` | object | *(内置默认)* | 🟢 ACTIVE | 覆盖 ACP 系统提示词的 9 个结构性文档段（三态：字符串=替换 / null=删除 / 省略=默认）。不经风险门禁。 |
+| `nudgeSections` | object | *(内置默认)* | 🟢 ACTIVE | 覆盖压缩提示的 4 段引导类文本（efficiencyNote / emergencyHeader / t2Guidance / t3Guidance），同样三态。不经风险门禁。 |
+| `toolPrompts` | object | *(内置默认)* | 🟢 ACTIVE | 覆盖四个 ACP 工具的 LLM 文案（description / paramDescriptions / promptSnippet / promptGuidelines）。扩展加载时同步读取，改后需重启 pi。 |
+| `delegatePrompt` | string \| null | *(内置附录)* | 🟢 ACTIVE | 替换（string）或删除（null）delegate 启用时的 ACP_DELEGATE_NOTIFICATIONS 系统提示词附录。 |
 
 **环境变量**
 
@@ -627,6 +631,67 @@ provider 的 key 是 **Pi provider 名**(如 `"anthropic"`、`"openai"`、`"zhip
     },
     "acknowledgePromptsRisk": true
   }
+  ```
+
+### `promptSections`
+
+- **类型：** `object`（部分覆盖——逐段三态）
+- **默认值：** *(内置默认)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 覆盖 ACP 系统提示词的**结构性文档段**，而非压缩规则。九个键：`acpTags`、`summariesInContext`、`tools`、`whenToCompress`、`whenNotToCompress`、`multiTierIntro`、`decompressPhilosophy`、`contextBreakdown`、`throttleRetry`。三态语义：字符串**替换**该段，`null` **删除**该段，省略则保持默认。不经风险门禁——这些是文档说明，不是调优规则。四条承重规则（`compressPhilosophy` 等）仍在门禁的 `prompts` 键下，不能在此设置。示例：
+
+  ```json
+  {
+    "promptSections": {
+      "acpTags": "(自定义 acp 标签说明)",
+      "contextBreakdown": null
+    }
+  }
+  ```
+
+### `nudgeSections`
+
+- **类型：** `object`（部分覆盖——逐键三态）
+- **默认值：** *(内置默认)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 覆盖压缩提示的**引导类文本**。四个键：`efficiencyNote`（温和提示开场）、`emergencyHeader`（紧急提示开场）、`t2Guidance`（T2 蒸馏引导）、`t3Guidance`（T3 凝缩引导）。与 `promptSections` 相同的三态语义。不经风险门禁。触发行、渲染器标签和工具反馈文本属于契约锁定，不可覆盖。示例：
+
+  ```json
+  {
+    "nudgeSections": {
+      "efficiencyNote": "保持工作集精简——尽早折叠已消耗的输出。",
+      "emergencyHeader": null
+    }
+  }
+  ```
+
+### `toolPrompts`
+
+- **类型：** `object`（逐工具部分覆盖）
+- **默认值：** *(内置默认)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 覆盖四个 ACP 工具面向 LLM 的文案。键：`compress`、`decompress`、`search_context`、`acp_status`。每项可设 `description`（字符串）、`paramDescriptions`（参数名→字符串的对象——重写 schema 字段描述）、`promptSnippet`（字符串，显示在系统提示词的“可用工具”段）、`promptGuidelines`（字符串或字符串数组——追加到系统提示词 Guidelines 段）。在**扩展加载时同步读取**（工具定义在注册时固化），修改后需重启 pi。示例：
+
+  ```json
+  {
+    "toolPrompts": {
+      "compress": {
+        "promptSnippet": "compress({ content: [{ startId, endId, summary }] })",
+        "paramDescriptions": { "summary": "简短稠密摘要；路径+决策逐字保留。" }
+      }
+    }
+  }
+  ```
+
+### `delegatePrompt`
+
+- **类型：** `string | null`
+- **默认值：** *(内置 `ACP_DELEGATE_NOTIFICATIONS` 附录)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 替换（`string`）或删除（`null`）delegate 工具启用时追加到系统提示词的 `ACP_DELEGATE_NOTIFICATIONS` 附录。适用于用自己的后台任务机制、语义不同的宿主。仅在 `delegate` 启用时生效。示例：
+
+  ```json
+  { "delegatePrompt": "后台任务结果以系统通知到达——如相关则读取结果文件。" }
   ```
 
 ### `acknowledgePromptsRisk`

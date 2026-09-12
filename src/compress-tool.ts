@@ -8,6 +8,7 @@ import type { AcpRuntime } from "./runtime.js";
 import { MAX_COMPRESS_ATTEMPTS } from "./runtime.js";
 import { debug, logError, logInfo, logThrow, logWarn } from "./log.js";
 import { estimateTokens, collectCoveredMessageIds, collectImageTokens, modelSupportsImages, adjustedTokenCount } from "./tokens.js";
+import { applyToolPromptOverrides, type ToolPromptOverrides } from "./surface.js";
 import { lastTurnBoundaryId } from "./turn-boundary.js";
 import { resolveHostSession } from "./config.js";
 import { defaultCountTokens, parseCompressArgs, viableRanges, formatRanges, type CompressionBlock, type CompressionState, type CompressParseDiagnostics, type NudgeDecision } from "acp-kernel";
@@ -43,8 +44,8 @@ const CompressParams = Type.Object({
 
 type CompressArgs = Static<typeof CompressParams>;
 
-export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof CompressParams> {
-  return {
+export function makeCompressTool(runtime: AcpRuntime, overrides?: ToolPromptOverrides): ToolDefinition<typeof CompressParams> {
+  return applyToolPromptOverrides({
     name: "compress",
     label: "Compress",
     description:
@@ -68,7 +69,7 @@ export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof Com
       }
       return { details: undefined, content: [{ type: "text", text: result }] };
     },
-  };
+  }, overrides);
 }
 
 type RangeEntry = Static<typeof RangeSpec>;

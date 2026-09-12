@@ -644,6 +644,67 @@ The `prompts` object overrides acp-kernel's **load-bearing** compression prompt 
 - **Status:** 🟢 ACTIVE
 - **Description:** The safety gate for `prompts` overrides. Set to `true` to acknowledge that replacing the kernel's tuned compression rules may reduce summary quality, and to make your `prompts` overrides take effect. When `false` (or omitted), all `prompts` overrides are ignored and the kernel defaults are used. If `resolvePrompts` rejects your override (for example a malformed value that still passes the type check), the extension falls back to the defaults and logs a `prompts-resolve-failed` warning rather than failing to start.
 
+### `promptSections`
+
+- **Type:** `object` (partial — per-section tri-state)
+- **Default:** *(built-in defaults)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Override the **structural documentation sections** of the ACP system prompt — not the compression rules. Nine keys: `acpTags`, `summariesInContext`, `tools`, `whenToCompress`, `whenNotToCompress`, `multiTierIntro`, `decompressPhilosophy`, `contextBreakdown`, `throttleRetry`. Tri-state per key: a string **replaces** the section, `null` **removes** it entirely, omitting it keeps the default. Not risk-gated — these are docs, not tuned rules. The four load-bearing rule blocks (`compressPhilosophy` etc.) stay under the gated `prompts` key and cannot be set here. Example:
+
+  ```json
+  {
+    "promptSections": {
+      "acpTags": "(custom explanation of the acp tags)",
+      "contextBreakdown": null
+    }
+  }
+  ```
+
+### `nudgeSections`
+
+- **Type:** `object` (partial — per-key tri-state)
+- **Default:** *(built-in defaults)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Override the **guidance-class texts** of compression nudges. Four keys: `efficiencyNote` (gentle nudge preamble), `emergencyHeader` (emergency nudge preamble), `t2Guidance` (tier-2 distillation guidance), `t3Guidance` (tier-3 condensation guidance). Same tri-state semantics as `promptSections`. Not risk-gated. Trigger lines, renderer labels, and tool feedback text are contract-locked and cannot be overridden. Example:
+
+  ```json
+  {
+    "nudgeSections": {
+      "efficiencyNote": "Keep the working set lean — fold consumed output early.",
+      "emergencyHeader": null
+    }
+  }
+  ```
+
+### `toolPrompts`
+
+- **Type:** `object` (per-tool partial)
+- **Default:** *(built-in defaults)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Override the LLM-facing text of the four ACP tools. Keys: `compress`, `decompress`, `search_context`, `acp_status`. Each accepts `description` (string), `paramDescriptions` (object mapping parameter names to strings — rewrites the schema field descriptions), `promptSnippet` (string, shown in the "Available tools" system prompt section), and `promptGuidelines` (string or string[] — appended to the system prompt Guidelines section). Read **synchronously at extension load** (tool definitions are frozen at registration), so changes require restarting pi. Example:
+
+  ```json
+  {
+    "toolPrompts": {
+      "compress": {
+        "promptSnippet": "compress({ content: [{ startId, endId, summary }] })",
+        "paramDescriptions": { "summary": "Short dense summary; paths + decisions verbatim." }
+      }
+    }
+  }
+  ```
+
+### `delegatePrompt`
+
+- **Type:** `string | null`
+- **Default:** *(built-in `ACP_DELEGATE_NOTIFICATIONS` appendix)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Replace (`string`) or remove (`null`) the `ACP_DELEGATE_NOTIFICATIONS` appendix appended to the system prompt when the delegate tool is enabled. Useful for hosts that run their own delegate scheme with different semantics. Only applies when `delegate` is enabled. Example:
+
+  ```json
+  { "delegatePrompt": "Background task results arrive as system notifications — read the result file if relevant." }
+  ```
+
 ---
 
 ## Environment Variables

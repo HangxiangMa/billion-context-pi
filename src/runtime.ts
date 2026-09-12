@@ -15,6 +15,7 @@ import { entriesToCoreMessages, extractText, matchesStoredText, messageIdentity,
 import { SessionStateStore, deriveChildState, type LiveRefOrigin } from "./state.js";
 import { hasCompressHistory, rebuildStateFromLog } from "./state-rebuild.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
+import { sanitizeSurfaceConfig } from "./surface.js";
 import { ThrottleEpisode } from "./throttle-retry.js";
 import { logInfo, logWarn, setDebugEnabled } from "./log.js";
 import { findUniqueLongestRun, type MatchRange } from "./sequence-match.js";
@@ -471,7 +472,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
       lastUserConfigKey = key;
       // Re-derive from the factory config (not adapterRef) so a key REMOVED from
       // acp.json actually reverts, instead of lingering from a prior apply.
-      adapterRef = applyUserConfig(factoryAdapter, user);
+      adapterRef = sanitizeSurfaceConfig(applyUserConfig(factoryAdapter, user));
       if (adapterRef.debug !== undefined) setDebugEnabled(adapterRef.debug);
       logInfo("runtime", { event: "config-reloaded", limit: adapterRef.modelContextLimit ?? null });
     } catch (e) {

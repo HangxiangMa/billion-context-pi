@@ -4,6 +4,8 @@ import { homedir } from "node:os";
 import { CONFIG_DIR_NAME } from "./config-dir.js";
 import type { Prompts } from "acp-kernel";
 import type { AdapterConfig, CompressConfig, DelegateConfig, HostSessionConfig, RepetitionGuardConfig } from "./config.js";
+import type { PiPromptSections } from "./system-prompt.js";
+import type { NudgeSectionsConfig, ToolPromptsConfig } from "./surface.js";
 import type { DegenerationGuardConfig } from "./degeneration.js";
 import type { ThrottleRetryConfig } from "./throttle-retry.js";
 import { debug, logWarn } from "./log.js";
@@ -27,6 +29,10 @@ export interface UserAcpConfig {
   displayUsage?: "merged" | "separate";
   prompts?: Partial<Prompts>;
   acknowledgePromptsRisk?: boolean;
+  promptSections?: PiPromptSections;
+  nudgeSections?: NudgeSectionsConfig;
+  toolPrompts?: ToolPromptsConfig;
+  delegatePrompt?: string | null;
   hostSession?: boolean | HostSessionConfig;
 }
 
@@ -65,6 +71,7 @@ const KNOWN = new Set([
   "outputHeadroomMaxPct",
   "repetitionGuard", "degenerationGuard",
   "prompts", "acknowledgePromptsRisk",
+  "promptSections", "nudgeSections", "toolPrompts", "delegatePrompt",
   "hostSession",
 ]);
 
