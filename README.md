@@ -10,7 +10,6 @@ The model decides <em>when</em> and <em>what</em> to compress — not a hard lim
 
 ---
 
-
 ## 📄 Paper / Preprint
 
 - **[Model-Driven Incremental Hierarchical Compression: Training-Free Multi-Generational Context Management for Long-Lived Coding Agents](./paper/model-driven-incremental-hierarchical-compression-training-free-multi-generational-context-management-for-long-lived-coding-agents.md)** (English, v0.2)
