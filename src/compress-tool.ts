@@ -151,11 +151,20 @@ function jsonParseError(content: CompressArgs["content"]): string | undefined {
   }
 }
 
-/** Panel block count ("… (~N reclaimed, B blocks)"), or -1 for non-panels. */
-function compressPanelBlocks(text: string): number {
+/** Panel block count, or -1 for non-panels. Accepts BOTH the legacy
+ *  "… B blocks)" form (0-block runs; historical transcripts replayed by
+ *  index/floor-stale) and the #376 "… blocks: b3=m00044–m00097*, …" form. */
+export function compressPanelBlocks(text: string): number {
   if (!text.trimStart().startsWith("▣ ACP |")) return -1;
   const m = text.match(/, (\d+) blocks?\)/);
-  return m ? Number(m[1]) : -1;
+  if (m) return Number(m[1]);
+  // Count span-form entries by their label tokens (bN= / bN(Tn)=), NOT by
+  // capturing to the next ")" — tier labels carry a ")" that would truncate a
+  // naive capture and undercount any batch whose first new block is T2/T3.
+  const idx = text.indexOf(", blocks: ");
+  if (idx === -1) return -1;
+  const header = text.slice(idx).split("\n", 1)[0] ?? "";
+  return header.match(/\bb\d+(?:\(T\d+\))?=/g)?.length ?? 0;
 }
 
 /** Success = completed run that created >= 1 block (partial range errors
@@ -186,6 +195,40 @@ const DEAD_REPEAT_REJECT = 2;
 
 function paddedRef(n: number): string {
   return `m${String(n).padStart(5, "0")}`;
+}
+
+// issue #376: report each new block's ACTUAL coverage, not the requested
+// startId/endId — kernel protection exclusions and turn-integrity rollback
+// can shrink a range post-hoc, so inferring coverage from the request drifts
+// the model's block ledger against nudge ranges. Span = first/last ref of
+// effectiveMessageIds; `*` marks spans containing still-existing refs the
+// block does not cover (excluded — see the ⚠️ warnings line); tier ≥ 2 marked.
+export function blockSpanLabel(block: CompressionBlock, state: CompressionState): string {
+  const nums: number[] = [];
+  for (const id of block.effectiveMessageIds) {
+    const ref = state.messageRefs.byRaw[id];
+    if (!ref || !ref.startsWith("m")) continue;
+    const n = Number(ref.slice(1));
+    if (Number.isInteger(n) && n > 0) nums.push(n);
+  }
+  const tierMark = block.tier >= 2 ? `(T${block.tier})` : "";
+  if (nums.length === 0) return `${block.blockId}${tierMark}`;
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const n of nums) {
+    if (n < lo) lo = n;
+    if (n > hi) hi = n;
+  }
+  const present = new Set(nums);
+  let star = "";
+  for (let n = lo; n <= hi; n++) {
+    if (!present.has(n) && state.messageRefs.byRef[paddedRef(n)] !== undefined) {
+      star = "*";
+      break;
+    }
+  }
+  const span = lo === hi ? paddedRef(lo) : `${paddedRef(lo)}–${paddedRef(hi)}`;
+  return `${block.blockId}${tierMark}=${span}${star}`;
 }
 
 function blockHasVisibleAnchor(block: CompressionBlock, visibleIds: Set<string>): boolean {
@@ -452,7 +495,10 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     logWarn("compress", { sid: ctx.sessionManager.getSessionId(), event: "warnings", count: warnings.length, warnings: warnings.slice(0, 5) });
   }
 
-  const lines = [`▣ ACP | ${formatK(beforeTokens)} → ${formatK(afterTokens)} tokens (~${formatK(reclaimed)} reclaimed, ${blocksCreated} block${blocksCreated > 1 ? "s" : ""})`];
+  const spanClause = blocksCreated > 0
+    ? `blocks: ${newBlocks.map((b) => blockSpanLabel(b, applied.state)).join(", ")}`
+    : "0 blocks";
+  const lines = [`▣ ACP | ${formatK(beforeTokens)} → ${formatK(afterTokens)} tokens (~${formatK(reclaimed)} reclaimed, ${spanClause})`];
   if (warnings.length > 0) lines.push("⚠️ " + warnings.join("; "));
   if (errors.length > 0) lines.push("Errors: " + errors.join("; "));
   return lines.join("\n");
