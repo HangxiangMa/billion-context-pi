@@ -764,6 +764,20 @@ provider 的 key 是 **Pi provider 名**(如 `"anthropic"`、`"openai"`、`"zhip
 - `toolPrompts`：先按工具，再按字段（`description`、`promptSnippet`、`promptGuidelines`），再按 `paramDescriptions` 内逐参数。
 - `delegatePrompt`：内联存在则胜（含 `null`）。
 
+### 可编程来源（宿主与未来安装器）
+
+查找链本身可插拔。**包源（PackSource）**是实现以下接口的任意对象：
+
+```ts
+interface PackSource {
+  id: string;
+  resolve(name: string): Pack | null;  // 已消毒表面 + 来源标签
+  list?(): Pack[];                       // 可选，支撑列包
+}
+```
+
+内置包、目录包、任何托管注册表全部走同一个 `createPackResolver([...sources])`——首个命中者胜，**前置的 source 可遮蔽一切**。这就是为将来 `bili-pi install` 式包管理器预留的集成点：把包文件写进用户目录（零代码），或在默认链前面注册一个 managed source——两条路都不改核心。内嵌适配器的宿主也可以自建 resolver 传给 `resolveActivePack`。
+
 ### 风险门
 
 包的 `prompts` 块会覆盖压缩规则字符串，与内联 `prompts` 完全一样——因此受同一个 [`acknowledgePromptsRisk`](#acknowledgepromptsrisk) 开关门控。`acp.json` 未设该标志时，包的 `prompts` 块被忽略（包内其余照常生效）并记录警告。该标志不能随包分发——它必须是显式的本地选择。

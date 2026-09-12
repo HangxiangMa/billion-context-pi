@@ -768,6 +768,20 @@ The effective surface for a turn = **pack defaults ⊕ inline `acp.json` overrid
 - `toolPrompts`: per-tool, then per-field (`description`, `promptSnippet`, `promptGuidelines`), then per-param inside `paramDescriptions`.
 - `delegatePrompt`: inline wins if present (including `null`).
 
+### Programmatic sources (hosts & future installers)
+
+The discovery chain is itself pluggable. A **pack source** is anything implementing:
+
+```ts
+interface PackSource {
+  id: string;
+  resolve(name: string): Pack | null;  // sanitized surface + provenance tag
+  list?(): Pack[];                       // optional, powers pack listings
+}
+```
+
+Built-in packs, directory packs, and any managed registry all flow through one `createPackResolver([...sources])` — first match wins, so a **prepended source shadows everything**. That is the intended integration point for a future `bili-pi install`-style pack manager: write pack files into the user dir (zero code), or register a managed source ahead of the defaults — no core changes either way. Hosts embedding the adapter can build their own resolver and pass it to `resolveActivePack`.
+
 ### Risk gating
 
 A pack's `prompts` block overrides the compression rule strings, exactly like inline `prompts` — so it is gated by the same [`acknowledgePromptsRisk`](#acknowledgepromptsrisk) switch. Without that flag set in `acp.json`, the pack's `prompts` block is ignored (everything else in the pack still applies); a warning is logged. The flag cannot be shipped inside a pack — it must be an explicit local choice.

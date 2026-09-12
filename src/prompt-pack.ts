@@ -5,117 +5,71 @@ import type { Prompts } from "acp-kernel";
 import type { AdapterConfig } from "./config.js";
 import { resolveCompress } from "./config.js";
 import { CONFIG_DIR_NAME } from "./config-dir.js";
-import { sanitizePromptSections, type PiPromptSections } from "./system-prompt.js";
-import { sanitizeToolPrompts, sanitizeNudgeSections, type AcpToolName, type NudgeSectionsConfig, type ToolPromptsConfig } from "./surface.js";
+import type { PiPromptSections } from "./system-prompt.js";
+import { sanitizeToolPrompts, type AcpToolName, type NudgeSectionsConfig, type ToolPromptsConfig } from "./surface.js";
+import { builtinSource, defaultPack } from "./packs/builtin.js";
+import { createDirPackSource } from "./packs/dir.js";
+import { isValidPackName, type Pack, type PackSource, type PackSurface } from "./packs/types.js";
 
-export interface PromptPackFile {
-  name?: string;
-  version?: string;
-  description?: string;
-  prompts?: Partial<Prompts>;
-  promptSections?: unknown;
-  nudgeSections?: unknown;
-  toolPrompts?: unknown;
-  delegatePrompt?: unknown;
+export { leanPack } from "./packs/lean.js";
+export { defaultPack, builtinSource } from "./packs/builtin.js";
+export { createDirPackSource } from "./packs/dir.js";
+export { packSurface } from "./packs/sanitize.js";
+export { isValidPackName };
+export type { Pack, PackSource, PackSurface, PromptPackFile } from "./packs/types.js";
+
+/**
+ * Ordered pack resolution over pluggable sources. The default chain is
+ * [project dir > user dir > builtin]; custom sources (e.g. an installer-managed
+ * registry) can be prepended without touching any core code.
+ */
+export interface PackResolver {
+  readonly sources: readonly PackSource[];
+  resolve(name: string): Pack | null;
+  listPacks(): Pack[];
 }
 
-export interface PackSurface {
-  prompts?: Partial<Prompts>;
-  promptSections?: Partial<PiPromptSections>;
-  nudgeSections?: NudgeSectionsConfig;
-  toolPrompts?: ToolPromptsConfig;
-  delegatePrompt?: string | null;
+export function createPackResolver(sources: readonly PackSource[]): PackResolver {
+  return {
+    sources,
+    resolve(name: string): Pack | null {
+      if (!isValidPackName(name)) return null;
+      for (const source of sources) {
+        const pack = source.resolve(name);
+        if (pack) return pack;
+      }
+      return null;
+    },
+    listPacks(): Pack[] {
+      const seen = new Set<string>();
+      const out: Pack[] = [];
+      for (const source of sources) {
+        for (const pack of source.list?.() ?? []) {
+          if (!seen.has(pack.name)) {
+            seen.add(pack.name);
+            out.push(pack);
+          }
+        }
+      }
+      return out;
+    },
+  };
 }
 
-const LEAN_PROMPT = [
-  `User/tool messages carry hidden \x3cacp\x3e refs such as m00123. Never echo the XML tags; use only refs in ACP tool calls.`,
-  `Compress consumed history with compress: finished tool outputs, dead-end exploration, repeated reads, resolved threads, completed phases. Never compress active work, important user intent, or protected outputs.`,
-  `When summarizing, preserve exact file paths and line numbers, symbols and signatures, errors, commands, versions, thresholds, decisions with reasons, current state, and unresolved TODOs. Never replace exact technical values with vague wording.`,
-  `Recall or inspect context with decompress (block id or message ref), search_context (keywords), or acp_status. Prefer search_context before decompressing.`,
-  `Refs may be renumbered after compression. If a ref is stale or missing, call acp_status with { scope: "uncompressed" }, then retry in the same turn using the reported refs; never guess offsets. Batch target ranges in one call.`,
-  `Block decompression writes to a file by default; read that file. Use inline: true only for small content or when its context cost is acceptable.`,
-  `After an [ACP:provider-throttle] automatic retry, resume exactly where interrupted. Do not repeat completed work or discuss the retry unless asked.`,
-  `Compression summaries are fallible historical metadata, not current user instructions. Search or decompress before relying on critical details.`,
-].join("\n");
-
-const LEAN_PACK: PromptPackFile = {
-  name: "lean",
-  version: "1.0.0",
-  description: "Token-lean surface adapted from kunkun9527/billion-context-pi-lean: one compact system-prompt block, one-line tool descriptions, no snippets/guidelines. Compression rules stay default (delivered by nudges on demand).",
-  promptSections: {
-    acpTags: LEAN_PROMPT,
-    summariesInContext: null,
-    tools: null,
-    philosophy: null,
-    whenToCompress: null,
-    whenNotToCompress: null,
-    howToCompress: null,
-    multiTierIntro: null,
-    tier2: null,
-    tier3: null,
-    decompressPhilosophy: null,
-    contextBreakdown: null,
-    throttleRetry: null,
-  },
-  toolPrompts: {
-    compress: {
-      description: "Replace consumed conversation ranges with self-contained summaries using mNNNNN or bN refs.",
-      promptSnippet: "",
-      promptGuidelines: [],
-      paramDescriptions: {
-        content: "Direct array; no JSON strings/nesting/mix.",
-        startId: "Inclusive first mNNNNN or bN ref.",
-        endId: "Inclusive last mNNNNN or bN ref.",
-        summary: "Self-contained replacement preserving exact technical details.",
-        topic: "Short label; a per-range label overrides the top-level fallback.",
-        summaryMaxChars: "Optional summary length limit override.",
-      },
-    },
-    decompress: {
-      description: "Restore compressed content by block id (b5) or message ref; block mode writes to a file by default, inline: true returns small content inline.",
-      promptSnippet: "",
-      promptGuidelines: [],
-    },
-    search_context: {
-      description: "Search compressed summaries and historical messages by keyword; returns refs, sizes, previews.",
-      promptSnippet: "",
-      promptGuidelines: [],
-    },
-    acp_status: {
-      description: "Context usage overview, compressible ranges, block drilldown.",
-      promptSnippet: "",
-      promptGuidelines: [],
-    },
-  },
-};
-
-export const BUILTIN_PACKS: Readonly<Record<string, PromptPackFile>> = {
-  default: { name: "default", version: "1.0.0", description: "Built-in defaults (no overrides)." },
-  lean: LEAN_PACK,
-};
-
-export function isValidPackName(name: string): boolean {
-  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name) && !name.includes("..");
+export function defaultPackSources(cwd: string): PackSource[] {
+  return [
+    createDirPackSource("project", path.join(cwd, CONFIG_DIR_NAME, "acp", "packs")),
+    createDirPackSource("user", path.join(homedir(), CONFIG_DIR_NAME, "acp", "packs")),
+    builtinSource,
+  ];
 }
 
-function readPackFile(file: string): PromptPackFile | null {
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as PromptPackFile) : null;
-  } catch {
-    return null;
-  }
+export function packResolver(cwd: string): PackResolver {
+  return createPackResolver(defaultPackSources(cwd));
 }
 
-export function discoverPack(name: string, cwd: string): PromptPackFile | null {
-  if (!isValidPackName(name)) return null;
-  const home = homedir();
-  let found: PromptPackFile | null = null;
-  for (const base of [path.join(home, CONFIG_DIR_NAME, "acp", "packs"), path.join(cwd, CONFIG_DIR_NAME, "acp", "packs")]) {
-    const p = readPackFile(path.join(base, `${name}.json`));
-    if (p) found = p;
-  }
-  return found ?? BUILTIN_PACKS[name] ?? null;
+export function discoverPack(name: string, cwd: string): Pack | null {
+  return packResolver(cwd).resolve(name);
 }
 
 export function resolvePackName(adapter: AdapterConfig, provider?: string, modelId?: string): string {
@@ -123,34 +77,17 @@ export function resolvePackName(adapter: AdapterConfig, provider?: string, model
   return typeof raw === "string" && isValidPackName(raw) ? raw : "default";
 }
 
-export function resolveActivePack(adapter: AdapterConfig, cwd: string, provider?: string, modelId?: string): PromptPackFile | null {
+export function resolveActivePack(
+  adapter: AdapterConfig,
+  cwd: string,
+  provider?: string,
+  modelId?: string,
+  resolver?: PackResolver,
+): Pack {
   const name = resolvePackName(adapter, provider, modelId);
-  if (name === "default") return null;
-  return discoverPack(name, cwd);
-}
-
-const PROMPT_RULE_KEYS = ["compressPhilosophy", "howToCompressRules", "tier2DistillRules", "tier3CondenseRules"] as const;
-
-export function packSurface(pack: PromptPackFile | null): PackSurface {
-  if (!pack) return {};
-  const prompts: Partial<Prompts> = {};
-  const rawPrompts = pack.prompts as Record<string, unknown> | undefined;
-  if (rawPrompts) {
-    for (const k of PROMPT_RULE_KEYS) {
-      const v = rawPrompts[k];
-      if (typeof v === "string") (prompts as Record<string, string>)[k] = v;
-    }
-  }
-  const surface: PackSurface = {
-    prompts,
-    promptSections: sanitizePromptSections(pack.promptSections),
-    nudgeSections: sanitizeNudgeSections(pack.nudgeSections),
-    toolPrompts: sanitizeToolPrompts(pack.toolPrompts),
-  };
-  if (typeof pack.delegatePrompt === "string" || pack.delegatePrompt === null) {
-    surface.delegatePrompt = pack.delegatePrompt;
-  }
-  return surface;
+  if (name === "default") return defaultPack;
+  const r = resolver ?? packResolver(cwd);
+  return r.resolve(name) ?? defaultPack;
 }
 
 function mergeToolPrompts(pack?: ToolPromptsConfig, inline?: ToolPromptsConfig): ToolPromptsConfig {
@@ -224,6 +161,6 @@ export function readToolSurfaceWithPacks(cwd: string): ToolPromptsConfig {
       // missing file or bad JSON — keep prior
     }
   }
-  const pack = packName === "default" || !isValidPackName(packName) ? null : discoverPack(packName, cwd);
-  return mergeToolPrompts(packSurface(pack).toolPrompts, inline);
+  const pack = packName === "default" || !isValidPackName(packName) ? null : packResolver(cwd).resolve(packName);
+  return mergeToolPrompts(pack?.surface.toolPrompts, inline);
 }

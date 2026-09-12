@@ -18,7 +18,7 @@ import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage, setDelegatePolicy, setDelegateDefaults, setDelegateNotifyIfRead, markDelegateResultRead, markDelegateRunReadByCommand } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
-import { mergeSurface, packSurface, readToolSurfaceWithPacks, resolveActivePack } from "./prompt-pack.js";
+import { mergeSurface, readToolSurfaceWithPacks, resolveActivePack } from "./prompt-pack.js";
 import type { NudgeSectionsConfig } from "./surface.js";
 import { coreOutToAgentMessages, extractText } from "./messages.js";
 import { countThinkingChars, dropCompressReasoning } from "./reasoning-drop.js";
@@ -621,7 +621,7 @@ function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
     if (runtime.refused) return;
     const m = ctx?.model as { provider?: string; id?: string } | undefined;
     const cwd = ctx?.cwd ?? process.cwd();
-    const merged = mergeSurface(packSurface(resolveActivePack(runtime.adapter, cwd, m?.provider, m?.id)), runtime.adapter);
+    const merged = mergeSurface(resolveActivePack(runtime.adapter, cwd, m?.provider, m?.id).surface, runtime.adapter);
     // Unconditional: switching to a model/pack without prompt overrides must
     // reset the rules to kernel defaults, not keep the previous pack's.
     try {
@@ -646,7 +646,7 @@ function activeNudgeSections(runtime: AcpRuntime, ctx?: ExtensionContext): Nudge
   const m = ctx?.model as { provider?: string; id?: string } | undefined;
   const cwd = ctx?.cwd ?? process.cwd();
   const pack = resolveActivePack(runtime.adapter, cwd, m?.provider, m?.id);
-  return mergeSurface(packSurface(pack), runtime.adapter).nudgeSections;
+  return mergeSurface(pack.surface, runtime.adapter).nudgeSections;
 }
 
 // Context-overflow self-heal: when the model API rejects a request because the
