@@ -612,19 +612,27 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
   });
 }
 
+let lastPackPromptGateKeys: string | null = null;
+
 function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("before_agent_start", (event, ctx) => {
     // Refused host (OMP): don't inject the ACP system prompt — the model must
     // not learn about compress/decompress on a host where they can't work.
     if (runtime.refused) return;
     const m = ctx?.model as { provider?: string; id?: string } | undefined;
-    const merged = mergeSurface(packSurface(resolveActivePack(runtime.adapter, process.cwd(), m?.provider, m?.id)), runtime.adapter);
-    if (Object.keys(merged.prompts).length > 0) {
-      try {
-        runtime.setPrompts(resolvePrompts(merged.prompts, { acknowledgeRisk: runtime.adapter.acknowledgePromptsRisk === true }));
-      } catch (e) {
-        logWarn("config", { event: "pack-prompts-gated", error: e instanceof Error ? e.message : String(e) });
+    const cwd = ctx?.cwd ?? process.cwd();
+    const merged = mergeSurface(packSurface(resolveActivePack(runtime.adapter, cwd, m?.provider, m?.id)), runtime.adapter);
+    // Unconditional: switching to a model/pack without prompt overrides must
+    // reset the rules to kernel defaults, not keep the previous pack's.
+    try {
+      runtime.setPrompts(resolvePrompts(merged.prompts, { acknowledgeRisk: runtime.adapter.acknowledgePromptsRisk === true }));
+    } catch (e) {
+      const keys = Object.keys(merged.prompts).sort().join(",");
+      if (keys !== lastPackPromptGateKeys) {
+        lastPackPromptGateKeys = keys;
+        logWarn("config", { event: "pack-prompts-gated", keys, error: e instanceof Error ? e.message : String(e) });
       }
+      runtime.setPrompts(defaultPrompts);
     }
     const delegate = resolveDelegate(runtime.adapter).enabled;
     const acp = buildAcpSystemPrompt(runtime.prompts, merged.promptSections);
@@ -636,7 +644,8 @@ function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
 
 function activeNudgeSections(runtime: AcpRuntime, ctx?: ExtensionContext): NudgeSectionsConfig {
   const m = ctx?.model as { provider?: string; id?: string } | undefined;
-  const pack = resolveActivePack(runtime.adapter, process.cwd(), m?.provider, m?.id);
+  const cwd = ctx?.cwd ?? process.cwd();
+  const pack = resolveActivePack(runtime.adapter, cwd, m?.provider, m?.id);
   return mergeSurface(packSurface(pack), runtime.adapter).nudgeSections;
 }
 

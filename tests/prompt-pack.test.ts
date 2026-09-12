@@ -4,6 +4,8 @@ import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { defaultPrompts } from "acp-kernel";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createAcpExtension } from "../src/index.js";
 import { buildAcpSystemPrompt } from "../src/system-prompt.js";
 import {
   BUILTIN_PACKS,
@@ -154,6 +156,73 @@ test("readToolSurfaceWithPacks applies base pack under inline (per-field, per-pa
     assert.equal(out.compress?.paramDescriptions?.endId, "Inclusive last mNNNNN or bN ref.");
     assert.deepEqual(out.compress?.promptGuidelines, []);
     assert.equal(out.decompress?.promptSnippet, "");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+type BeforeAgentStartHandler = (event: { systemPrompt: string }, ctx: unknown) => { systemPrompt: string };
+
+function wireBeforeAgentStart(adapter: AdapterConfig): BeforeAgentStartHandler {
+  let handler: BeforeAgentStartHandler | null = null;
+  const api = {
+    on: (event: string, h: unknown): void => {
+      if (event === "before_agent_start") handler = h as BeforeAgentStartHandler;
+    },
+    tools: [] as unknown[],
+    commands: new Map<string, unknown>(),
+    registerTool: (_tool: unknown): void => {},
+    registerCommand: (_name: string, _options: unknown): void => {},
+  };
+  createAcpExtension(adapter)(api as ExtensionAPI);
+  assert.ok(handler, "before_agent_start wired");
+  return handler!;
+}
+
+test("before_agent_start applies pack prompts per model and resets to defaults when switching away", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "acp-pack-wire-"));
+  try {
+    await mkdir(path.join(dir, ".pi/acp/packs"), { recursive: true });
+    await writeFile(
+      path.join(dir, ".pi/acp/packs/mypack.json"),
+      JSON.stringify({ name: "mypack", prompts: { compressPhilosophy: "PACK PHILO RULE" } }),
+      "utf8",
+    );
+    const adapter = {
+      acknowledgePromptsRisk: true,
+      compress: { providers: { openai: { promptPack: "mypack" } } },
+    } satisfies AdapterConfig;
+    const beforeAgentStart = wireBeforeAgentStart(adapter);
+    const defaultPhilo = defaultPrompts.compressPhilosophy.slice(0, 40);
+
+    const packed = beforeAgentStart({ systemPrompt: "" }, { model: { provider: "openai", id: "gpt-x" }, cwd: dir });
+    assert.ok(packed.systemPrompt.includes("PACK PHILO RULE"), "pack rules reach the system prompt for the pack's model");
+    assert.ok(!packed.systemPrompt.includes(defaultPhilo), "pack replaces the default philosophy");
+
+    const reset = beforeAgentStart({ systemPrompt: "" }, { model: { provider: "anthropic", id: "claude-x" }, cwd: dir });
+    assert.ok(!reset.systemPrompt.includes("PACK PHILO RULE"), "switching to a model without the pack must drop its rules");
+    assert.ok(reset.systemPrompt.includes(defaultPhilo), "kernel default rules restored after switch-away");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("before_agent_start risk-gates pack prompts without acknowledgePromptsRisk", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "acp-pack-gate-"));
+  try {
+    await mkdir(path.join(dir, ".pi/acp/packs"), { recursive: true });
+    await writeFile(
+      path.join(dir, ".pi/acp/packs/gated.json"),
+      JSON.stringify({ name: "gated", prompts: { compressPhilosophy: "GATED PHILO RULE" } }),
+      "utf8",
+    );
+    const adapter = {
+      compress: { promptPack: "gated" },
+    } satisfies AdapterConfig;
+    const beforeAgentStart = wireBeforeAgentStart(adapter);
+    const result = beforeAgentStart({ systemPrompt: "" }, { model: { provider: "openai", id: "gpt-x" }, cwd: dir });
+    assert.ok(!result.systemPrompt.includes("GATED PHILO RULE"), "ungated pack prompts are dropped");
+    assert.ok(result.systemPrompt.includes(defaultPrompts.compressPhilosophy.slice(0, 40)), "defaults stay in force");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
