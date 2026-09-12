@@ -44,9 +44,9 @@ const CONTEXT_EXCLUDED_CUSTOM_TYPES = new Set<string>([ACP_STATUS_CUSTOM_TYPE, A
  *  views can never drift apart; defined here (not there) because it needs
  *  extractText — importing that back would create a cycle. */
 export function isCustomMessageEntry(entry: TurnBoundaryEntry): entry is TurnBoundaryEntry & { type: "custom_message" } {
-  return entry.type === "custom_message"
-    && !CONTEXT_EXCLUDED_CUSTOM_TYPES.has(entry.customType)
-    && extractText(entry.content).length > 0;
+  if (entry.type !== "custom_message") return false;
+  if (entry.customType !== undefined && CONTEXT_EXCLUDED_CUSTOM_TYPES.has(entry.customType)) return false;
+  return extractText(entry.content).length > 0;
 }
 
 export function entriesToCoreMessages(entries: SessionEntry[]): CoreMessage[] {
