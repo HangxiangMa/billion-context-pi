@@ -112,7 +112,7 @@ All keys below are currently **ACTIVE**.
 | Key | Type | Default | Status | Description |
 |-----|------|---------|--------|-------------|
 | `delegate.enabled` | boolean | `true` | 🟢 ACTIVE | Enable the `acp_delegate` tools and their system-prompt section. |
-| `delegate.forceEnable` | boolean | `false` | 🟢 ACTIVE | Keep `acp_delegate` active even when the third-party `pi-subagents` extension is installed (default: `acp_delegate` stands down automatically when it detects one). |
+| `delegate.forceEnable` | boolean | `false` | 🟢 ACTIVE | Keep `acp_delegate` active even when a **project-scope** `pi-subagents` install is detected (default: auto stand-down; a user-scope-only install just logs a warning). Overridden by `PI_ACP_DELEGATE_FORCE_ENABLE`. |
 | `delegate.displayUsage` | string | `"separate"` | 🟢 ACTIVE | Controls how delegate sub-agent token usage is reported. |
 | `delegate.maxDepth` | number | `2` | 🟢 ACTIVE | Max nesting depth for `acp_delegate` (main session = depth 0; a session *at* this depth is a leaf and cannot delegate again). Set `1` so delegates never nest. |
 | `delegate.syncTimeoutMinutes` | number | `5` | 🟢 ACTIVE | Hard timeout for **synchronous** `acp_delegate` calls, in minutes. `0` / `null` disables it. |
@@ -172,6 +172,7 @@ All keys below are currently **ACTIVE**.
 | `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES` | Override `delegate.syncTimeoutMinutes`; `0` disables the sync hard timeout. |
 | `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES` | Override `delegate.idleTimeoutMinutes`; `0` disables the idle watchdog. |
 | `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES` | Override `delegate.asyncTimeoutMinutes`; `0` disables the async hard limit. |
+| `PI_ACP_DELEGATE_FORCE_ENABLE` | Override `delegate.forceEnable`; takes `true` / `false`. |
 
 > **Only the documented keys are read from `acp.json`.** Other tuning knobs (`preserveRecentMessages`, `protectedTools`) are code-level and not user-overridable. The three compression thresholds form a three-tier escalation: growth-driven soft nudges → forced nudges at `compress.maxContextLimit` → emergency truncation at `compress.emergencyThresholdPercent`.
 
@@ -255,7 +256,8 @@ The `delegate` sub-object controls the `acp_delegate` sub-agent tool family (`ac
 - **Type:** `boolean`
 - **Default:** `false`
 - **Status:** 🟢 ACTIVE
-- **Description:** Keep `acp_delegate` active even when the third-party [`pi-subagents`](https://github.com/nicobailon/pi-subagents) extension is installed. By default (`false`), detecting an installed `pi-subagents` at session start makes `acp_delegate` stand down automatically — both extensions ship overlapping sub-agent systems (own fleet checker, spawn path, and the `ctrl+alt+f` inspector shortcut clash behind #412), and running two fleets confuses the model. When it stands down, a reminder explains that `pi-subagents`' agents do NOT get ACP context compression by default, and that running `/acp-subagents` injects `compress` / `decompress` / `search_context` / `acp_status` into its agent overrides. Ignored when `pi-subagents` is not installed or when `delegate.enabled` is `false`.
+- **Description:** Keep `acp_delegate` active even when the third-party [`pi-subagents`](https://github.com/nicobailon/pi-subagents) extension is installed at project scope. By default (`false`), a **project-scope** `pi-subagents` install (`<cwd>/.pi/npm/node_modules/pi-subagents` or `<cwd>/.pi/extensions/`) detected at session start makes `acp_delegate` stand down automatically — both extensions ship overlapping sub-agent systems (own fleet checker, spawn path, and the inspector shortcut clash behind #412), and running two fleets confuses the model. A **user-scope-only** install (`~/.pi/npm`, user extensions dir) does NOT disable `acp_delegate`; it logs a warning instead, so a global install can't silently turn it off in every project. When it stands down, a reminder explains that `pi-subagents`' agents do NOT get ACP context compression by default, and that running `/acp-subagents` injects `compress` / `decompress` / `search_context` / `acp_status` into its agent overrides. Precedence: an explicit `delegate.enabled: false` always wins over `forceEnable`; the env var `PI_ACP_DELEGATE_FORCE_ENABLE` overrides this key.
+- **When it applies:** same timing as `delegate.enabled` — tools and the shortcut register at session start, so a change takes effect on the **next session**; the system-prompt section is resolved live on every turn and can disappear mid-session before the tools do.
 
 ### `delegate.displayUsage`
 
@@ -883,3 +885,10 @@ Environment variables take precedence over the JSON config files. They are usefu
 - **Default:** *(unset — cap follows `delegate.maxConcurrent`, then unlimited)*
 - **Status:** 🟢 ACTIVE
 - **Description:** Override the background (`async`) delegate concurrency cap. **Takes precedence** over `delegate.maxConcurrent`. Set to `1` for forced serial execution. Invalid values fall back to the next source (then unlimited) with a warning rather than failing the session.
+
+### `PI_ACP_DELEGATE_FORCE_ENABLE`
+
+- **Type:** `true` | `false`
+- **Default:** *(unset — follows `delegate.forceEnable`, then false)*
+- **Status:** 🟢 ACTIVE
+- **Description:** Override whether `acp_delegate` stays active despite a detected project-scope `pi-subagents` install. **Takes precedence** over `delegate.forceEnable`. Unparseable values fall back to the config value with a warning rather than failing the session.

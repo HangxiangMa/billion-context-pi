@@ -48,7 +48,7 @@ import { applyOutputHeadroom, inspectOverflowMessage, resolveOutputHeadroomCap }
 import { UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
 import { isUnsupportedHost } from "./host.js";
 import { isBiliProxyBaseUrl, PROXY_STAND_DOWN_MESSAGE } from "./proxy-detect.js";
-import { findPiSubagentsInstall, resolveAgentDir, DELEGATE_STAND_DOWN_MESSAGE } from "./setup-subagent-tools.js";
+import { findPiSubagentsInstalls, resolveAgentDir, DELEGATE_STAND_DOWN_MESSAGE } from "./setup-subagent-tools.js";
 
 // Host-facing API for multi-session hosts (docs/host-adapter.md, #367): the
 // extension keeps its own runtime instance private; hosts build their own via
@@ -221,20 +221,24 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       // sub-agent system (own fleet checker, spawn path, inspector shortcut —
       // the ctrl+alt+f clash behind #412). Running both fleets confuses the
       // model, and pi-subagents' agents never get ACP compression unless
-      // /acp-subagents injects the tools into their overrides. Stand
-      // acp_delegate down (tool registration below + system-prompt section)
-      // unless delegate.forceEnable opts back in. Cheap fs probe once per
-      // session — same pattern as the proxy stand down above.
-      if (delegateCfg.enabled) {
-        const thirdParty = findPiSubagentsInstall(resolveAgentDir(), ctx.cwd ?? process.cwd());
-        if (thirdParty && !delegateCfg.forceEnable) {
+      // /acp-subagents injects the tools into their overrides. A PROJECT-scope
+      // install stands acp_delegate down (tool registration below + system-
+      // prompt section) unless delegate.forceEnable opts back in; a USER-scope-
+      // only install logs a warning and leaves acp_delegate active, so a global
+      // install can't silently disable it in every project. Cheap fs probe once
+      // per session — same pattern as the proxy stand down above.
+      if (delegateCfg.enabled && !delegateCfg.forceEnable) {
+        const scopes = findPiSubagentsInstalls(resolveAgentDir(), ctx.cwd ?? process.cwd());
+        if (scopes.project[0] !== undefined) {
           delegateStoodDown = true;
-          logWarn("delegate", { event: "third-party-subagent-detected", sid, install: thirdParty, action: "stand-down", hint: "run /acp-subagents to give its agents ACP compression tools; delegate.forceEnable=true keeps acp_delegate" });
+          logWarn("delegate", { event: "delegate-auto-disabled", sid, install: scopes.project[0], scope: "project", hint: "run /acp-subagents to give its agents ACP compression tools; delegate.forceEnable=true keeps acp_delegate" });
           if (!subagentStandDownWarned) {
             subagentStandDownWarned = true;
             if (ctx.hasUI) ctx.ui.notify(DELEGATE_STAND_DOWN_MESSAGE, "warning");
             else console.error(DELEGATE_STAND_DOWN_MESSAGE);
           }
+        } else if (scopes.user[0] !== undefined) {
+          logWarn("delegate", { event: "delegate-user-scope-detected", sid, install: scopes.user[0], action: "warn-only", hint: "user-level pi-subagents does not disable acp_delegate; run /acp-subagents to give its agents ACP compression tools" });
         }
       }
     } catch (e) {

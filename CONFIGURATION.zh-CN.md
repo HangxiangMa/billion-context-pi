@@ -111,6 +111,7 @@
 | 键 | 类型 | 默认值 | 状态 | 说明 |
 |----|------|--------|------|------|
 | `delegate.enabled` | boolean | `true` | 🟢 ACTIVE | 启用 `acp_delegate` 工具及其系统提示部分。 |
+| `delegate.forceEnable` | boolean | `false` | 🟢 ACTIVE | 检测到**项目级** `pi-subagents` 安装时仍保留 `acp_delegate`（默认：自动停用；仅用户级安装只记警告日志）。可被 `PI_ACP_DELEGATE_FORCE_ENABLE` 覆盖。 |
 | `delegate.displayUsage` | string | `"separate"` | 🟢 ACTIVE | 控制 delegate 子代理的 token 用量如何报回主会话。 |
 | `delegate.maxDepth` | number | `2` | 🟢 ACTIVE | `acp_delegate` 最大嵌套深度（主会话 = 深度 0；处于该深度的会话成为叶子，不能再委派）。设为 `1` 可禁止 delegate 再嵌套。 |
 | `delegate.syncTimeoutMinutes` | number | `5` | 🟢 ACTIVE | **同步** `acp_delegate` 调用的硬超时（分钟）。`0` / `null` 禁用。 |
@@ -174,6 +175,7 @@
 | `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES` | 覆盖 `delegate.syncTimeoutMinutes`；`0` 禁用同步硬超时。 |
 | `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES` | 覆盖 `delegate.idleTimeoutMinutes`；`0` 禁用闲置看门狗。 |
 | `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES` | 覆盖 `delegate.asyncTimeoutMinutes`；`0` 禁用异步硬上限。 |
+| `PI_ACP_DELEGATE_FORCE_ENABLE` | 覆盖 `delegate.forceEnable`；取值 `true` / `false`。 |
 
 > **只有文档中列出的键才会从 `acp.json` 读取。** 其他调优参数（`preserveRecentMessages`、`protectedTools`）是代码级别的，不开放给用户。三个压缩阈值构成三级递进：基于增长的软 nudge → 越过 `compress.maxContextLimit` 后的强制 nudge → 越过 `compress.emergencyThresholdPercent` 后的紧急截断。
 
@@ -244,6 +246,14 @@
 - **生效时机：** 三个工具在会话启动时注册，因此改动在**下一个会话**（或重启 Pi）生效。系统提示段每回合实时解析，可能在工具之前先于会话内消失。
 - **只关提示段：** `delegatePrompt: null` 移除 `ACP_DELEGATE NOTIFICATIONS` 段但保留工具。
 - **不能替代：** Pi 原生的 `--exclude-tools acp_delegate,acp_delegate_wait,acp_delegate_cancel` 只隐藏工具、**不**隐藏系统提示段，会让模型被告知它调不到的工具。
+
+### `delegate.forceEnable`
+
+- **类型：** `boolean`
+- **默认值：** `false`
+- **状态：** 🟢 ACTIVE
+- **说明：** 检测到第三方 [`pi-subagents`](https://github.com/nicobailon/pi-subagents) 扩展的**项目级**安装（`<cwd>/.pi/npm/node_modules/pi-subagents` 或 `<cwd>/.pi/extensions/`）时仍保留 `acp_delegate`。默认（`false`）下，会话启动检测到项目级安装会自动停用 `acp_delegate`——两个扩展各带一套重叠的子代理系统（各自的 fleet 检查器、spawn 路径，以及 #412 背后的 inspector 快捷键冲突），两套 fleet 并存会让模型困惑。**仅用户级**（全局，`~/.pi/npm`、用户 extensions 目录）安装不会停用 `acp_delegate`，只记一条警告日志——避免一次全局安装让所有项目都失去 acp_delegate。停用时会打印醒目提醒：说明 pi-subagents 的子代理默认拿不到 ACP 上下文压缩，运行 `/acp-subagents` 可把 compress / decompress / search_context / acp_status 注入其 agent overrides。优先级：显式 `delegate.enabled: false` 永远赢过 `forceEnable`；env `PI_ACP_DELEGATE_FORCE_ENABLE` 覆盖本键。
+- **生效时机：** 与 `delegate.enabled` 相同——工具与快捷键在会话启动时注册，改动在**下一个会话**生效；系统提示段每回合实时解析，可能在工具之前先于会话内消失。
 
 ### `delegate.displayUsage`
 
@@ -871,3 +881,10 @@ interface PackSource {
 - **默认值：** *(未设置——上限遵循 `delegate.maxConcurrent`，再否则 unlimited)*
 - **状态：** 🟢 ACTIVE
 - **说明：** 覆盖后台（`async`）delegate 并发上限。**优先于** `delegate.maxConcurrent`。设为 `1` 强制串行执行。无效值会带警告回退到下一个来源（最终 unlimited），而不是让会话失败。
+
+### `PI_ACP_DELEGATE_FORCE_ENABLE`
+
+- **类型：** `true` | `false`
+- **默认值：** *(未设置——遵循 `delegate.forceEnable`，再否则 false)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 覆盖"检测到项目级 `pi-subagents` 安装时是否仍保留 `acp_delegate`"。**优先于** `delegate.forceEnable`。无法解析的值带警告回退到配置值，而不是让会话失败。
