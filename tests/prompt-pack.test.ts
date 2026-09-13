@@ -7,7 +7,7 @@ import { defaultPrompts } from "acp-kernel";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createAcpExtension } from "../src/index.js";
 import { buildAcpSystemPrompt } from "../src/system-prompt.js";
-import { leanPack } from "../src/prompt-pack.js";
+import { leanPack, resolveSurfaceMeta } from "../src/prompt-pack.js";
 import {
   isValidPackName,
   discoverPack,
@@ -381,4 +381,35 @@ test("dir source list() survives missing directory; builtin source lists default
   assert.ok(names.includes("default"));
   assert.ok(names.includes("lean"));
   assert.equal(defaultPack.surface, defaultPack.surface);
+});
+
+test("resolveSurfaceMeta reports default when no pack is selected", async () => {
+  const adapter = {} satisfies AdapterConfig;
+  const meta = resolveSurfaceMeta(adapter, tmpdir());
+  assert.equal(meta.pack, "default");
+  assert.equal(meta.host.startsWith("billion-context-pi "), true);
+});
+
+test("resolveSurfaceMeta names a resolvable project pack and its version", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "acp-surface-meta-"));
+  try {
+    await mkdir(path.join(dir, ".pi/acp/packs"), { recursive: true });
+    await writeFile(
+      path.join(dir, ".pi/acp/packs/versioned.json"),
+      JSON.stringify({ name: "versioned", version: "2.1.0", prompts: { compressPhilosophy: "X" } }),
+      "utf8",
+    );
+    const adapter = { compress: { promptPack: "versioned" } } satisfies AdapterConfig;
+    const meta = resolveSurfaceMeta(adapter, dir);
+    assert.equal(meta.pack, "versioned");
+    assert.equal(meta.packVersion, "2.1.0");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveSurfaceMeta falls back to default for an unknown pack name", () => {
+  const adapter = { compress: { promptPack: "no-such-pack-xyz" } } satisfies AdapterConfig;
+  const meta = resolveSurfaceMeta(adapter, tmpdir());
+  assert.equal(meta.pack, "default");
 });
