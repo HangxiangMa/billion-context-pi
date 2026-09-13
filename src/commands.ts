@@ -9,6 +9,7 @@ import { collectCoveredMessageIds, estimateTokens, collectImageTokens, modelSupp
 import { usageAnchorPredatesCompression } from "./floor-stale.js";
 import { applyOutputHeadroom, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
 import { buildStatusPanel } from "acp-kernel/panel";
+import { resolveSurfaceMeta } from "./prompt-pack.js";
 import { getDelegateUsage } from "./delegate-tool.js";
 import { openFleetInspector } from "./fleet-inspector.js";
 import { resolveDelegate } from "./config.js";
@@ -221,7 +222,9 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   // systemPromptTokens (measured) and unprunedTokens — the chars/4 estimate
   // of the full projection, so the kit derives Session-only on the same
   // estimation scale as the sent view (never cross-scale; omp issue #18).
-  const versionStr = CURRENT_VERSION ? `billion-context-pi@${CURRENT_VERSION}` : undefined;
+  const versionStr = CURRENT_VERSION
+    ? `billion-context-pi@${CURRENT_VERSION} · pack: ${resolveSurfaceMeta(runtime.adapter, ctx?.cwd ?? process.cwd(), (ctx?.model as { provider?: string; id?: string } | undefined)?.provider, (ctx?.model as { provider?: string; id?: string } | undefined)?.id).pack}`
+    : undefined;
   let text = buildStatusPanel({
     version: versionStr,
     tokenCount: sessionTokens,

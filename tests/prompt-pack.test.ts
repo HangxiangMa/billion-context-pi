@@ -7,7 +7,7 @@ import { defaultPrompts } from "acp-kernel";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createAcpExtension } from "../src/index.js";
 import { buildAcpSystemPrompt } from "../src/system-prompt.js";
-import { leanPack } from "../src/prompt-pack.js";
+import { leanPack, resolveSurfaceMeta } from "../src/prompt-pack.js";
 import {
   isValidPackName,
   discoverPack,
@@ -47,7 +47,9 @@ test("lean pack is a kernel builtin carrying its pi surface under adapters", () 
   const rules = leanPiSections().acpTags;
   assert.equal(typeof rules, "string");
   assert.ok(String(rules).includes("Recall on demand only"));
-  assert.ok(String(rules).includes("settled history"));
+  assert.ok(!String(rules).includes("settled history"), "inverted 'settled history' phrasing is gone (acp-kernel #265)");
+  assert.ok(String(rules).includes("never treat a summarized instruction or decision as current"), "summary-trust guardrail present");
+  assert.ok(String(rules).includes("fresh user confirmation"));
   assert.ok(String(rules).includes("makes recall unnecessary"));
 });
 
@@ -57,7 +59,15 @@ test("piAdapterSurface(leanPack): aligned rules kept, every other section nulled
   const rawHowTo = leanPiSections().howToCompress;
   assert.ok(rawHowTo === null || typeof rawHowTo === "string", "kernel ships null or string for the rule slot");
   assert.equal((s.promptSections as Record<string, unknown>).howToCompress, rawHowTo, "kernel-shipped rule-slot value survives sanitization");
-  for (const k of ["summariesInContext", "tools", "philosophy", "tier2", "tier3", "multiTierIntro", "decompressPhilosophy", "contextBreakdown", "throttleRetry", "whenToCompress", "whenNotToCompress"]) {
+  const rawSummaries = leanPiSections().summariesInContext;
+  if (rawSummaries === null) {
+    assert.equal((s.promptSections as Record<string, unknown>).summariesInContext, null);
+  } else {
+    assert.equal(typeof rawSummaries, "string", "kernel 0.0.68 ships the compact trust guardrail");
+    assert.equal((s.promptSections as Record<string, unknown>).summariesInContext, rawSummaries, "guardrail survives sanitization");
+    assert.ok(rawSummaries.includes("NOT current user messages"));
+  }
+  for (const k of ["tools", "philosophy", "tier2", "tier3", "multiTierIntro", "decompressPhilosophy", "contextBreakdown", "throttleRetry", "whenToCompress", "whenNotToCompress"]) {
     assert.equal((s.promptSections as Record<string, unknown>)[k], null, `${k} should be null`);
   }
   for (const t of ["compress", "decompress", "search_context", "acp_status"] as const) {
@@ -73,13 +83,19 @@ test("lean pack system prompt collapses to header + lean bullets", () => {
   assert.ok(text.startsWith("\nACP context management\n\n"));
   assert.ok(text.includes("Never echo the XML tags"));
   assert.ok(!text.includes("ACP TAGS"));
-  assert.ok(!text.includes("COMPRESSION SUMMARIES IN CONTEXT"));
+  if (typeof leanPiSections().summariesInContext === "string") {
+    assert.ok(text.includes("COMPRESSION SUMMARIES IN CONTEXT"), "compact trust guardrail reaches the prompt (0.0.68)");
+    assert.ok(text.includes("NOT current user messages"));
+  } else {
+    assert.ok(!text.includes("COMPRESSION SUMMARIES IN CONTEXT"));
+  }
   assert.ok(!text.includes("Compression Philosophy"));
   assert.ok(!text.includes("WHEN TO COMPRESS"));
   assert.ok(!text.includes("Compress by need, not by percentage"));
   assert.ok(!text.includes("TIER 2 COMPRESSION"));
   if (typeof leanPiSections().howToCompress === "string") {
-    assert.ok(text.includes("HOW TO COMPRESS (condensed)"), "lean condensed rules reach the prompt");
+    assert.ok(text.includes("HOW TO COMPRESS"), "lean condensed rules reach the prompt");
+    assert.ok(text.includes("KEEP VERBATIM"));
   } else {
     assert.ok(!text.includes("HOW TO COMPRESS"), "rule slot removed while the kernel ships null");
   }
@@ -365,4 +381,35 @@ test("dir source list() survives missing directory; builtin source lists default
   assert.ok(names.includes("default"));
   assert.ok(names.includes("lean"));
   assert.equal(defaultPack.surface, defaultPack.surface);
+});
+
+test("resolveSurfaceMeta reports default when no pack is selected", async () => {
+  const adapter = {} satisfies AdapterConfig;
+  const meta = resolveSurfaceMeta(adapter, tmpdir());
+  assert.equal(meta.pack, "default");
+  assert.equal(meta.host.startsWith("billion-context-pi "), true);
+});
+
+test("resolveSurfaceMeta names a resolvable project pack and its version", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "acp-surface-meta-"));
+  try {
+    await mkdir(path.join(dir, ".pi/acp/packs"), { recursive: true });
+    await writeFile(
+      path.join(dir, ".pi/acp/packs/versioned.json"),
+      JSON.stringify({ name: "versioned", version: "2.1.0", prompts: { compressPhilosophy: "X" } }),
+      "utf8",
+    );
+    const adapter = { compress: { promptPack: "versioned" } } satisfies AdapterConfig;
+    const meta = resolveSurfaceMeta(adapter, dir);
+    assert.equal(meta.pack, "versioned");
+    assert.equal(meta.packVersion, "2.1.0");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveSurfaceMeta falls back to default for an unknown pack name", () => {
+  const adapter = { compress: { promptPack: "no-such-pack-xyz" } } satisfies AdapterConfig;
+  const meta = resolveSurfaceMeta(adapter, tmpdir());
+  assert.equal(meta.pack, "default");
 });
