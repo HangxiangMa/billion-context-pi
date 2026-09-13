@@ -149,7 +149,7 @@
 | `compress.emergencyThresholdPercent` | number \| string | `"95%"` | 🟢 ACTIVE | 触发紧急截断的上下文阈值。 |
 | `compress.nudgeGrowthTokens` | number | `50000` | 🟢 ACTIVE | 软压缩 nudge 的 token 增长步长。 |
 | `compress.reasoning` | object | `{ "drop": true, "threshold": 2048 }` | 🟢 ACTIVE | 请求时丢弃历史 `compress` 调用上的超大思考（不修改持久化历史）。 |
-| `compress.promptPack` | string | *（未设置 —— 恒等表面，全部使用内核默认值）* | 🟢 ACTIVE | 选择一个具名[提示词包](#提示词包)（如内置 `lean`）——一套策划好的表面覆盖（提示词分段、nudge 分段、工具提示词、delegate 提示词）。与其他 `compress.*` 字段同一三级级联；分段/工具覆盖直接生效，不经 `acknowledgePromptsRisk` 门控（该门控只管规则文本覆盖——内联 `compress.prompts` 与包的 `prompts` 块）。需要 acp-kernel >= 0.0.66。 |
+| `compress.promptPack` | string | `default` | 🟢 ACTIVE | 选择具名[提示词包](#提示词包)（如内置 `lean`）——一行替代整块内联 `promptSections`/`toolPrompts` JSON；作为内联覆盖之下的基础层生效。 |
 
 **prompts 键**
 
