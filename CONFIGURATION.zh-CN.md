@@ -63,7 +63,32 @@
 }
 ```
 
-覆盖内核压缩提示词规则的高级配置（需要风险确认）。只设置你想改的字段，其余继承内核默认值：
+### 微调压缩提示词
+
+三个层级，从最轻到最重——用第一个够用的即可：
+
+**1. 选一个提示词包——一行搞定，无需风险确认。**[提示词包](#提示词包)把一整套调好的表面（系统提示词各节、nudge 文本、工具描述、压缩规则）打包在一起：
+
+```json
+{ "compress": { "promptPack": "lean" } }
+```
+
+内置包：`default`（完整表面）和 `lean`（约省 76%——适合会把工具 schema 原样抄进回答的小模型）。同一个键也可以走标准 `compress` 级联按 provider / 按 model 选包。
+
+**2. 逐项微调——三态，无需风险确认。**`promptSections`、`nudgeSections`、`toolPrompts` 覆盖表面的单个部分：**字符串替换**、`null` 删除、省略键保持默认。内联值优先于包的值：
+
+```json
+{
+  "compress": { "promptPack": "lean" },
+  "promptSections": { "whenToCompress": "（你的替换文本）" },
+  "nudgeSections": { "efficiencyNote": null },
+  "toolPrompts": { "compress": { "description": "把一段对话压缩成摘要。" } }
+}
+```
+
+逐键参考：[提示词自定义](#提示词自定义)。
+
+**3. 逐字替换内核压缩规则——需风险确认。**四个 `prompts.*` 字段是决定摘要*怎么写*的核心规则；替换它们可能悄悄降低摘要质量，因此需要显式确认。只设置你想改的字段，其余继承内核默认值：
 
 ```json
 {

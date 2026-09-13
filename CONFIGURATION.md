@@ -63,7 +63,32 @@ A minimal config enabling only debug logging:
 }
 ```
 
-An advanced config overriding the kernel's compression prompt rules (requires the risk acknowledgement). Set only the fields you want to change; the rest inherit the kernel defaults:
+### Tune the compression prompts
+
+Three levels, from least to most invasive — stop at the first one that fits:
+
+**1. Pick a prompt pack — one line, no risk gate.** A [prompt pack](#prompt-packs) bundles a complete tuned surface (system-prompt sections, nudge texts, tool descriptions, compression rules):
+
+```json
+{ "compress": { "promptPack": "lean" } }
+```
+
+Built-ins: `default` (full surface) and `lean` (≈76% smaller — best for small models that copy tool schemas verbatim into their answers). The same key also selects a pack per-provider or per-model through the standard `compress` cascade.
+
+**2. Tune individual items — tri-state, no risk gate.** `promptSections`, `nudgeSections`, and `toolPrompts` override single pieces of the surface: a **string replaces**, `null` **deletes**, omitting a key keeps the default. Inline values win over pack values:
+
+```json
+{
+  "compress": { "promptPack": "lean" },
+  "promptSections": { "whenToCompress": "(your replacement text)" },
+  "nudgeSections": { "efficiencyNote": null },
+  "toolPrompts": { "compress": { "description": "Compress a range of the conversation into a summary." } }
+}
+```
+
+Per-key reference: [Prompts Customization](#prompts-customization).
+
+**3. Replace the kernel's compression rules verbatim — risk-gated.** The four `prompts.*` fields are the load-bearing rules that control *how* summaries are written; replacing them can silently degrade summary quality, so they require an explicit acknowledgement. Set only the fields you want to change; the rest inherit the kernel defaults:
 
 ```json
 {
