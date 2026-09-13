@@ -150,7 +150,6 @@ All keys below are currently **ACTIVE**.
 | `compress.emergencyThresholdPercent` | number \| string | `"95%"` | 🟢 ACTIVE | Context threshold that triggers emergency truncation. |
 | `compress.nudgeGrowthTokens` | number | `50000` | 🟢 ACTIVE | Token growth step for soft compression nudges. |
 | `compress.reasoning` | object | `{ "drop": true, "threshold": 2048 }` | 🟢 ACTIVE | Drop oversized thinking from historical `compress` calls (request-time; persisted history untouched). |
-| `compress.promptPack` | string | `default` | 🟢 ACTIVE | Select a named [prompt pack](#prompt-packs) (e.g. the built-in `lean`) — one line replaces a whole inline `promptSections`/`toolPrompts` JSON block; applies as the base layer under inline overrides. |
 
 **Prompts keys**
 

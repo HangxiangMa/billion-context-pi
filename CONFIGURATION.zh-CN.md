@@ -149,7 +149,6 @@
 | `compress.emergencyThresholdPercent` | number \| string | `"95%"` | 🟢 ACTIVE | 触发紧急截断的上下文阈值。 |
 | `compress.nudgeGrowthTokens` | number | `50000` | 🟢 ACTIVE | 软压缩 nudge 的 token 增长步长。 |
 | `compress.reasoning` | object | `{ "drop": true, "threshold": 2048 }` | 🟢 ACTIVE | 请求时丢弃历史 `compress` 调用上的超大思考（不修改持久化历史）。 |
-| `compress.promptPack` | string | `default` | 🟢 ACTIVE | 选择具名[提示词包](#提示词包)（如内置 `lean`）——一行替代整块内联 `promptSections`/`toolPrompts` JSON；作为内联覆盖之下的基础层生效。 |
 
 **prompts 键**
 
@@ -161,7 +160,7 @@
 | `nudgeSections` | object | *(内置默认)* | 🟢 ACTIVE | 覆盖压缩提示的 4 段引导类文本（efficiencyNote / emergencyHeader / t2Guidance / t3Guidance），同样三态。不经风险门禁。 |
 | `toolPrompts` | object | *(内置默认)* | 🟢 ACTIVE | 覆盖四个 ACP 工具的 LLM 文案（description / paramDescriptions / promptSnippet / promptGuidelines）。扩展加载时同步读取，改后需重启 pi。 |
 | `delegatePrompt` | string \| null | *(内置附录)* | 🟢 ACTIVE | 替换（string）或删除（null）delegate 启用时的 ACP_DELEGATE_NOTIFICATIONS 系统提示词附录。 |
-| `promptPack` | string | *（未设置 —— 恒等表面，全部使用内核默认值）* | 🟢 ACTIVE | 选择具名[提示词包](#提示词包)（如内置 `lean`）——一行替代整块内联 `promptSections`/`toolPrompts` JSON；作为内联覆盖之下的基础层生效。 |
+| `promptPack` | string | `default` | 🟢 ACTIVE | 选择具名[提示词包](#提示词包)（如内置 `lean`）——一行替代整块内联 `promptSections`/`toolPrompts` JSON；作为内联覆盖之下的基础层生效。 |
 
 **环境变量**
 
