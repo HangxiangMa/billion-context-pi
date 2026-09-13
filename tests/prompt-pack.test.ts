@@ -54,7 +54,10 @@ test("lean pack is a kernel builtin carrying its pi surface under adapters", () 
 test("piAdapterSurface(leanPack): aligned rules kept, every other section nulled, lean tool extras", () => {
   const s = piAdapterSurface(leanPack);
   assert.equal(s.promptSections.acpTags, leanPiSections().acpTags);
-  for (const k of ["summariesInContext", "tools", "philosophy", "howToCompress", "tier2", "tier3", "multiTierIntro", "decompressPhilosophy", "contextBreakdown", "throttleRetry", "whenToCompress", "whenNotToCompress"]) {
+  const rawHowTo = leanPiSections().howToCompress;
+  assert.ok(rawHowTo === null || typeof rawHowTo === "string", "kernel ships null or string for the rule slot");
+  assert.equal((s.promptSections as Record<string, unknown>).howToCompress, rawHowTo, "kernel-shipped rule-slot value survives sanitization");
+  for (const k of ["summariesInContext", "tools", "philosophy", "tier2", "tier3", "multiTierIntro", "decompressPhilosophy", "contextBreakdown", "throttleRetry", "whenToCompress", "whenNotToCompress"]) {
     assert.equal((s.promptSections as Record<string, unknown>)[k], null, `${k} should be null`);
   }
   for (const t of ["compress", "decompress", "search_context", "acp_status"] as const) {
@@ -75,6 +78,11 @@ test("lean pack system prompt collapses to header + lean bullets", () => {
   assert.ok(!text.includes("WHEN TO COMPRESS"));
   assert.ok(!text.includes("Compress by need, not by percentage"));
   assert.ok(!text.includes("TIER 2 COMPRESSION"));
+  if (typeof leanPiSections().howToCompress === "string") {
+    assert.ok(text.includes("HOW TO COMPRESS (condensed)"), "lean condensed rules reach the prompt");
+  } else {
+    assert.ok(!text.includes("HOW TO COMPRESS"), "rule slot removed while the kernel ships null");
+  }
 });
 
 test("resolvePackName walks the three compress levels, model wins", () => {
@@ -174,7 +182,7 @@ test("piAdapterSurface sanitizes junk: bad section types dropped, malformed extr
     surface: {
       adapters: {
         pi: {
-          promptSections: { acpTags: 42, tools: null, whenToCompress: "keep", philosophy: "no" },
+          promptSections: { acpTags: 42, tools: null, whenToCompress: "keep", tier3: 9 },
           toolExtras: {
             compress: { promptSnippet: 7, promptGuidelines: "single" },
             bash: { promptSnippet: "nope" },

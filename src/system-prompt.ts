@@ -11,10 +11,10 @@ export interface PiPromptSections {
   decompressPhilosophy?: SectionOverride;
   contextBreakdown?: SectionOverride;
   throttleRetry?: SectionOverride;
-  philosophy?: null;
-  howToCompress?: null;
-  tier2?: null;
-  tier3?: null;
+  philosophy?: SectionOverride;
+  howToCompress?: SectionOverride;
+  tier2?: SectionOverride;
+  tier3?: SectionOverride;
 }
 
 const SECTIONS: ReadonlyArray<readonly [string, string]> = [
@@ -83,10 +83,8 @@ export function sanitizePromptSections(raw: unknown): Partial<PiPromptSections> 
   if (!raw || typeof raw !== "object") return {};
   const out: Partial<PiPromptSections> = {};
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (PROMPT_SECTION_KEYS.has(k) && (typeof v === "string" || v === null)) {
+    if ((PROMPT_SECTION_KEYS.has(k) || RULE_SLOT_KEYS.has(k)) && (typeof v === "string" || v === null)) {
       (out as Record<string, SectionOverride>)[k] = v;
-    } else if (RULE_SLOT_KEYS.has(k) && v === null) {
-      (out as Record<string, SectionOverride>)[k] = null;
     }
   }
   return out;
