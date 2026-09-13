@@ -33,9 +33,17 @@ test("promptSections: string replaces, null removes, unknown keys ignored", () =
   assert.equal(ignored, base);
 });
 
-test("promptSections: null on a contract-locked rule slot is dropped cleanly", () => {
-  const withNullRule = sanitizePromptSections({ compressPhilosophy: null });
-  assert.deepEqual(withNullRule, {});
+test("promptSections: rule slots take string (replace) or null (remove), junk dropped", () => {
+  const s = sanitizePromptSections({ philosophy: "PHILO", howToCompress: "HOWTO", tier2: null, tier3: 7, compressPhilosophy: null });
+  assert.deepEqual(s, { philosophy: "PHILO", howToCompress: "HOWTO", tier2: null });
+  const defaultHead = defaultPrompts.howToCompressRules.slice(0, 40);
+  const replaced = buildAcpSystemPrompt(defaultPrompts, { howToCompress: "CUSTOM HOW TO COMPRESS BODY" });
+  assert.ok(replaced.includes("CUSTOM HOW TO COMPRESS BODY"));
+  assert.ok(!replaced.includes(defaultHead), "default how-to-compress replaced");
+  const removed = buildAcpSystemPrompt(defaultPrompts, { howToCompress: null, philosophy: null });
+  assert.ok(!removed.includes("HOW TO COMPRESS"));
+  assert.ok(!removed.includes("Compression Philosophy:"));
+  assert.ok(removed.includes("WHEN TO COMPRESS"), "other sections untouched");
 });
 
 test("sanitizeNudgeSections keeps 4 known keys with string|null, drops the rest", () => {

@@ -34,7 +34,7 @@ Create `~/.pi/acp.json` (or `<project>/.pi/acp.json`) and drop in whichever keys
   "modelContextLimit": 200000,
   "outputHeadroomMaxPct": 0.25,
   "toolBashDefaultTimeout": 60,
-  "toolOutputMaxBytes": 200000,
+  "toolOutputMaxBytes": 50000,
 
   "throttleRetry": {
     "enabled": true,
@@ -101,7 +101,7 @@ All keys below are currently **ACTIVE**.
 | `modelContextLimit` | number | *(auto)* | 🟢 ACTIVE | Override the context limit (in tokens). |
 | `outputHeadroomMaxPct` | number \| string | `0.25` | 🟢 ACTIVE | Cap on the output-headroom reservation, as a fraction of the context window. |
 | `toolBashDefaultTimeout` | number | `60` | 🟢 ACTIVE | Default `bash` tool timeout in seconds when the model omits it. |
-| `toolOutputMaxBytes` | number | `200000` | 🟢 ACTIVE | Hard byte cap on tool result text. |
+| `toolOutputMaxBytes` | number | `50000` | 🟢 ACTIVE | Hard byte cap on tool result text. |
 | `throttleRetry` | boolean \| object | `true` | 🟢 ACTIVE | Auto-retry provider token rate-limit errors with progressive backoff. |
 | `repetitionGuard` | boolean \| object | `true` | 🟢 ACTIVE | Break infinite loops of byte-identical tool calls (warn at 3 consecutive, block + abort at 5). |
 | `degenerationGuard` | boolean \| object | `true` | 🟢 ACTIVE | Collapse degenerate single-codepoint runs (e.g. 4655×「【」) in assistant text/thinking of the outgoing view and inject a one-shot recovery notice — breaks the abort loop where pi replays degenerated thinking back to the provider on every request (#351). |
@@ -227,9 +227,9 @@ All keys below are currently **ACTIVE**.
 ### `toolOutputMaxBytes`
 
 - **Type:** `number`
-- **Default:** `200000`
+- **Default:** `50000`
 - **Status:** 🟢 ACTIVE
-- **Description:** A hard byte cap (~200 KB, roughly 5000 lines) applied to tool result text via the `tool_result` hook. It stops runaway output that Pi's own caps cannot catch (for example, from tools Pi does not cap). When the cap fires, the oversized text is head-truncated with a notice telling the model how to see the full output. Set lower (e.g. `8192`) for a tighter context budget, or set to `0` to disable the cap entirely.
+- **Description:** A hard byte cap (~50 KB, roughly 1250 lines) applied to tool result text via the `tool_result` hook. Aligned with Pi's own bash/read/grep cap so every tool path lands under one ceiling; the net still catches runaway output from tools Pi does not cap (MCP/custom). When the cap fires, the oversized text is head-truncated with a notice telling the model how to see the full output. Set higher for large MCP outputs, lower (e.g. `8192`) for a tighter context budget, or set to `0` to disable the cap entirely.
 
 ---
 
@@ -676,7 +676,7 @@ The `prompts` object overrides acp-kernel's **load-bearing** compression prompt 
 - **Type:** `object` (partial — per-section tri-state)
 - **Default:** *(built-in defaults)*
 - **Status:** 🟢 ACTIVE
-- **Description:** Override the **structural documentation sections** of the ACP system prompt — not the compression rules. Nine keys: `acpTags`, `summariesInContext`, `tools`, `whenToCompress`, `whenNotToCompress`, `multiTierIntro`, `decompressPhilosophy`, `contextBreakdown`, `throttleRetry`. Tri-state per key: a string **replaces** the section, `null` **removes** it entirely, omitting it keeps the default. Not risk-gated — these are docs, not tuned rules. The four load-bearing rule blocks (`compressPhilosophy` etc.) stay under the gated `prompts` key and cannot be set here. Example:
+- **Description:** Override sections of the ACP system prompt. Thirteen keys: the nine structural documentation sections (`acpTags`, `summariesInContext`, `tools`, `whenToCompress`, `whenNotToCompress`, `multiTierIntro`, `decompressPhilosophy`, `contextBreakdown`, `throttleRetry`) plus the four rule blocks (`philosophy`, `howToCompress`, `tier2`, `tier3`). Tri-state per key: a string **replaces** the section, `null` **removes** it entirely, omitting it keeps the default. Not risk-gated — for a risk-gated replacement of rule text, use `prompts`; when both are set, the `promptSections` value wins (applied last). Example:
 
   ```json
   {
