@@ -9,6 +9,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { setRunNpmForTest } from "../src/update.js";
 import { DELEGATE_STAND_DOWN_MESSAGE } from "../src/setup-subagent-tools.js";
+import { DEFAULT_FLEET_SHORTCUT } from "../src/config.js";
 
 // Headless handlers await the update check — keep every test hermetic by
 // resolving it through this fake (no network, no update available).
@@ -891,14 +892,20 @@ test("TUI (hasUI=true) context handler resolves without waiting for the update c
 
 // ─── #415: third-party subagent (pi-subagents) auto stand-down ──────────────
 
-function standDownFixture(withPiSubagents: boolean) {
+type StandDownScope = "none" | "user" | "project";
+
+function standDownFixture(scope: StandDownScope) {
   const tmp = mkdtempSync(join(tmpdir(), "acp-standdown-"));
   const agentDir = join(tmp, "agent");
   const cwd = join(tmp, "proj");
   mkdirSync(agentDir, { recursive: true });
   mkdirSync(cwd, { recursive: true });
-  if (withPiSubagents) {
+  if (scope === "user") {
     const pkg = join(agentDir, "npm", "node_modules", "pi-subagents");
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "pi-subagents", version: "0.53.0" }));
+  } else if (scope === "project") {
+    const pkg = join(cwd, CONFIG_DIR_NAME, "npm", "node_modules", "pi-subagents");
     mkdirSync(pkg, { recursive: true });
     writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "pi-subagents", version: "0.53.0" }));
   }
@@ -923,8 +930,8 @@ function piSessionCtx(tmp: string, cwd: string, extra?: Record<string, unknown>)
   return { ...base, cwd, hasUI: true, sessionManager: { ...base.sessionManager, buildContextEntries: () => [] }, ...extra };
 }
 
-test("#415: pi-subagents detected → acp_delegate stands down (tools, shortcut, prompt section) + reminder points to /acp-subagents", async () => {
-  const fx = standDownFixture(true);
+test("#415: project-scope pi-subagents → acp_delegate stands down (tools, shortcut, prompt section) + reminder points to /acp-subagents", async () => {
+  const fx = standDownFixture("project");
   try {
     await withAgentDir(fx.agentDir, async () => {
       const { api, handlers } = captureApi();
@@ -944,7 +951,7 @@ test("#415: pi-subagents detected → acp_delegate stands down (tools, shortcut,
       assert.ok(!toolNames.includes("acp_delegate_wait"), "acp_delegate_wait not registered while stood down");
       assert.ok(!toolNames.includes("acp_delegate_cancel"), "acp_delegate_cancel not registered while stood down");
       assert.ok(toolNames.includes("compress"), "core ACP tools still registered");
-      assert.deepEqual(shortcuts, [], "ctrl+alt+f shortcut not registered while stood down");
+      assert.deepEqual(shortcuts, [], "fleet shortcut not registered while stood down");
 
       const promptResult = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
       assert.ok(!promptResult.systemPrompt.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate prompt section omitted while stood down");
@@ -957,8 +964,36 @@ test("#415: pi-subagents detected → acp_delegate stands down (tools, shortcut,
   }
 });
 
-test("#415: delegate.forceEnable keeps acp_delegate despite pi-subagents", async () => {
-  const fx = standDownFixture(true);
+test("#415: user-scope-only pi-subagents → acp_delegate stays active (warning log only, no stand-down)", async () => {
+  const fx = standDownFixture("user");
+  try {
+    await withAgentDir(fx.agentDir, async () => {
+      const { api, handlers } = captureApi();
+      const shortcuts: string[] = [];
+      (api as any).registerShortcut = (key: string) => { shortcuts.push(key); };
+      createAcpExtension()(api as any);
+
+      const notified: string[] = [];
+      const ctx = piSessionCtx(fx.tmp, fx.cwd, {
+        ui: { notify: (msg: string) => { notified.push(msg); }, confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
+      });
+
+      await handlers.get("session_start")![0]!({}, ctx);
+
+      const toolNames = api.tools.map((t) => t.name);
+      assert.ok(toolNames.includes("acp_delegate"), "a global install must not disable acp_delegate in every project");
+      assert.ok(toolNames.includes("acp_delegate_wait"), "acp_delegate_wait registered");
+      assert.ok(toolNames.includes("acp_delegate_cancel"), "acp_delegate_cancel registered");
+      assert.deepEqual(shortcuts, [DEFAULT_FLEET_SHORTCUT], "fleet shortcut registered by default");
+      assert.ok(!notified.some((m) => m === DELEGATE_STAND_DOWN_MESSAGE), "no stand-down reminder for a user-scope-only install");
+    });
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("#415: delegate.forceEnable keeps acp_delegate despite project-scope pi-subagents", async () => {
+  const fx = standDownFixture("project");
   try {
     await withAgentDir(fx.agentDir, async () => {
       const { api, handlers } = captureApi();
@@ -966,14 +1001,18 @@ test("#415: delegate.forceEnable keeps acp_delegate despite pi-subagents", async
       (api as any).registerShortcut = (key: string) => { shortcuts.push(key); };
       createAcpExtension({ delegate: { forceEnable: true } })(api as any);
 
-      const ctx = piSessionCtx(fx.tmp, fx.cwd);
+      const notified: string[] = [];
+      const ctx = piSessionCtx(fx.tmp, fx.cwd, {
+        ui: { notify: (msg: string) => { notified.push(msg); }, confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
+      });
       await handlers.get("session_start")![0]!({}, ctx);
 
       const toolNames = api.tools.map((t) => t.name);
       assert.ok(toolNames.includes("acp_delegate"), "acp_delegate registered with forceEnable");
       assert.ok(toolNames.includes("acp_delegate_wait"), "acp_delegate_wait registered with forceEnable");
       assert.ok(toolNames.includes("acp_delegate_cancel"), "acp_delegate_cancel registered with forceEnable");
-      assert.deepEqual(shortcuts, ["ctrl+alt+f"], "shortcut registered with forceEnable");
+      assert.deepEqual(shortcuts, [DEFAULT_FLEET_SHORTCUT], "shortcut registered with forceEnable");
+      assert.ok(!notified.some((m) => m === DELEGATE_STAND_DOWN_MESSAGE), "no stand-down reminder when forceEnable is set");
 
       const promptResult = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
       assert.ok(promptResult.systemPrompt.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate prompt section present with forceEnable");
@@ -983,8 +1022,34 @@ test("#415: delegate.forceEnable keeps acp_delegate despite pi-subagents", async
   }
 });
 
+test("#415: explicit enabled:false wins over detection and forceEnable (priority matrix)", async () => {
+  const fx = standDownFixture("project");
+  try {
+    await withAgentDir(fx.agentDir, async () => {
+      const { api, handlers } = captureApi();
+      const shortcuts: string[] = [];
+      (api as any).registerShortcut = (key: string) => { shortcuts.push(key); };
+      createAcpExtension({ delegate: { enabled: false, forceEnable: true } })(api as any);
+
+      const ctx = piSessionCtx(fx.tmp, fx.cwd);
+      await handlers.get("session_start")![0]!({}, ctx);
+
+      const toolNames = api.tools.map((t) => t.name);
+      assert.ok(!toolNames.includes("acp_delegate"), "explicitly disabled delegate stays off despite forceEnable");
+      assert.ok(!toolNames.includes("acp_delegate_wait"), "acp_delegate_wait stays off");
+      assert.ok(!toolNames.includes("acp_delegate_cancel"), "acp_delegate_cancel stays off");
+      assert.deepEqual(shortcuts, [], "no shortcut when explicitly disabled");
+
+      const promptResult = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
+      assert.ok(!promptResult.systemPrompt.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate prompt section absent when explicitly disabled");
+    });
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test("#415: no pi-subagents → acp_delegate registers normally (regression guard)", async () => {
-  const fx = standDownFixture(false);
+  const fx = standDownFixture("none");
   try {
     await withAgentDir(fx.agentDir, async () => {
       const { api, handlers } = captureApi();
@@ -997,7 +1062,7 @@ test("#415: no pi-subagents → acp_delegate registers normally (regression guar
 
       const toolNames = api.tools.map((t) => t.name);
       assert.ok(toolNames.includes("acp_delegate"), "acp_delegate registered when no third-party subagent is installed");
-      assert.deepEqual(shortcuts, ["ctrl+alt+f"], "shortcut registered by default");
+      assert.deepEqual(shortcuts, [DEFAULT_FLEET_SHORTCUT], "shortcut registered by default");
     });
   } finally {
     fx.cleanup();

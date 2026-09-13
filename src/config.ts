@@ -353,13 +353,14 @@ export function resolveDelegate(adapter: AdapterConfig): DelegatePolicy {
     DEFAULT_DELEGATE_POLICY.asyncTimeoutMs!,
   );
   const maxConcurrent = resolveMaxConcurrent(process.env.PI_ACP_DELEGATE_MAX_CONCURRENT, cfg.maxConcurrent);
+  const forceEnable = resolveForceEnable(process.env.PI_ACP_DELEGATE_FORCE_ENABLE, cfg.forceEnable);
   if (idleMs === null) {
     logWarn("config", {
       event: "delegate-idle-watchdog-disabled",
       hint: "no-output watchdog is off; hung async runs must be cancelled manually via acp_delegate_cancel",
     });
   }
-  return { enabled, forceEnable: cfg.forceEnable === true, displayUsage, maxDepth, syncTimeoutMs, idleMs, asyncTimeoutMs, maxConcurrent, thinkingLevel: cfg.thinkingLevel, agents: cfg.agents, notifyIfRead: cfg.notifyIfRead ?? "skip", fleetShortcut: resolveFleetShortcut(cfg.fleetShortcut) };
+  return { enabled, forceEnable, displayUsage, maxDepth, syncTimeoutMs, idleMs, asyncTimeoutMs, maxConcurrent, thinkingLevel: cfg.thinkingLevel, agents: cfg.agents, notifyIfRead: cfg.notifyIfRead ?? "skip", fleetShortcut: resolveFleetShortcut(cfg.fleetShortcut) };
 }
 
 /** Resolve the fleet-inspector TUI shortcut: a string passes through verbatim
@@ -369,6 +370,18 @@ function resolveFleetShortcut(value: unknown): string {
   if (typeof value === "string") return value;
   if (value !== undefined) logWarn("config", { event: "delegate-config-invalid", field: "fleetShortcut", value: String(value), fallback: DEFAULT_FLEET_SHORTCUT });
   return DEFAULT_FLEET_SHORTCUT;
+}
+
+/** Resolve the force-enable override (#415): an explicit env value wins over
+ *  acp.json; anything unparseable falls back to the config value with a logged
+ *  warning rather than failing the session. */
+function resolveForceEnable(envValue: string | undefined, cfgValue: boolean | undefined): boolean {
+  if (envValue === "true") return true;
+  if (envValue === "false") return false;
+  if (envValue !== undefined) {
+    logWarn("config", { event: "delegate-config-invalid", field: "forceEnable", value: envValue, fallback: cfgValue === true });
+  }
+  return cfgValue === true;
 }
 
 function resolveMaxDepth(value: number | string | undefined): number {
