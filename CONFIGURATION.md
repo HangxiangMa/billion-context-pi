@@ -150,7 +150,7 @@ All keys below are currently **ACTIVE**.
 | `compress.emergencyThresholdPercent` | number \| string | `"95%"` | 🟢 ACTIVE | Context threshold that triggers emergency truncation. |
 | `compress.nudgeGrowthTokens` | number | `50000` | 🟢 ACTIVE | Token growth step for soft compression nudges. |
 | `compress.reasoning` | object | `{ "drop": true, "threshold": 2048 }` | 🟢 ACTIVE | Drop oversized thinking from historical `compress` calls (request-time; persisted history untouched). |
-| `compress.promptPack` | string | *(unset — identity surface, kernel defaults everywhere)* | 🟢 ACTIVE | Select a named [prompt pack](#prompt-packs) (e.g. the built-in `lean`) — a curated bundle of surface overrides (prompt sections, nudge sections, tool prompts, delegate prompt). Same three-level cascade as other `compress.*` fields; section/tool overrides apply directly, without the `acknowledgePromptsRisk` gate (that gate governs only rule-text overrides — inline `compress.prompts` and a pack's `prompts` block). Requires acp-kernel >= 0.0.66. |
+| `compress.promptPack` | string | `default` | 🟢 ACTIVE | Select a named [prompt pack](#prompt-packs) (e.g. the built-in `lean`) — one line replaces a whole inline `promptSections`/`toolPrompts` JSON block; applies as the base layer under inline overrides. |
 
 **Prompts keys**
 
