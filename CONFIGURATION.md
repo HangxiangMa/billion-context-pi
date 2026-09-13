@@ -666,7 +666,7 @@ The `prompts` object overrides acp-kernel's **load-bearing** compression prompt 
 - **Type:** `object` (partial — per-section tri-state)
 - **Default:** *(built-in defaults)*
 - **Status:** 🟢 ACTIVE
-- **Description:** Override the **structural documentation sections** of the ACP system prompt — not the compression rules. Nine keys: `acpTags`, `summariesInContext`, `tools`, `whenToCompress`, `whenNotToCompress`, `multiTierIntro`, `decompressPhilosophy`, `contextBreakdown`, `throttleRetry`. Tri-state per key: a string **replaces** the section, `null` **removes** it entirely, omitting it keeps the default. Not risk-gated — these are docs, not tuned rules. The four load-bearing rule blocks (`compressPhilosophy` etc.) stay under the gated `prompts` key and cannot be set here. Example:
+- **Description:** Override sections of the ACP system prompt. Thirteen keys: the nine structural documentation sections (`acpTags`, `summariesInContext`, `tools`, `whenToCompress`, `whenNotToCompress`, `multiTierIntro`, `decompressPhilosophy`, `contextBreakdown`, `throttleRetry`) plus the four rule blocks (`philosophy`, `howToCompress`, `tier2`, `tier3`). Tri-state per key: a string **replaces** the section, `null` **removes** it entirely, omitting it keeps the default. Not risk-gated — for a risk-gated replacement of rule text, use `prompts`; when both are set, the `promptSections` value wins (applied last). Example:
 
   ```json
   {
