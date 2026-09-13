@@ -22,6 +22,7 @@ interface StateCacheSlot {
   state: CompressionState;
   liveRefOrigins: LiveRefOrigin[];
   derivedFrom: DerivedFrom | null;
+  activePack?: string;
 }
 
 function stateFileFor(sessionFile: string | undefined): string | null {
@@ -67,14 +68,16 @@ export class SessionStateStore {
     let state = createInitialState();
     let liveRefOrigins: LiveRefOrigin[] = [];
     let derivedFrom: DerivedFrom | null = null;
+    let activePack: string | undefined;
     if (file) {
       try {
         const raw = await fs.readFile(file, "utf8");
-        const parsed = JSON.parse(raw) as CompressionState & { liveRefOrigins?: unknown; derivedFrom?: unknown };
+        const parsed = JSON.parse(raw) as CompressionState & { liveRefOrigins?: unknown; derivedFrom?: unknown; activePack?: unknown };
         if (parsed && Array.isArray(parsed.blocks)) {
           state = mergeInitialState(parsed);
           liveRefOrigins = parseLiveRefOrigins(parsed.liveRefOrigins);
           derivedFrom = parseDerivedFrom(parsed.derivedFrom);
+          if (typeof parsed.activePack === "string" && parsed.activePack) activePack = parsed.activePack;
         }
       } catch (e) {
         const code = (e as NodeJS.ErrnoException).code;
@@ -91,8 +94,20 @@ export class SessionStateStore {
         if (parentState) state = parentState;
       }
     }
-    this.cache.set(key, { state, liveRefOrigins, derivedFrom });
+    this.cache.set(key, { state, liveRefOrigins, derivedFrom, activePack });
     return state;
+  }
+
+  /** Stamp the effective prompt pack for the live session (audit trail:
+   *  persisted into the sidecar on the next save). */
+  setActivePack(sessionFile: string | undefined, sessionId: string, activePack: string): void {
+    const key = cacheKey(sessionFile, sessionId);
+    const slot = this.cache.get(key);
+    if (slot) this.cache.set(key, { ...slot, activePack });
+  }
+
+  getActivePack(sessionFile: string | undefined, sessionId: string): string | undefined {
+    return this.cache.get(cacheKey(sessionFile, sessionId))?.activePack;
   }
 
   async save(state: CompressionState, sessionFile: string | undefined, sessionId: string): Promise<void> {
@@ -101,11 +116,12 @@ export class SessionStateStore {
     const prev = this.cache.get(key);
     const liveRefOrigins = prev?.liveRefOrigins ?? [];
     const derivedFrom = prev?.derivedFrom ?? null;
+    const activePack = prev?.activePack;
     // Cache update is unconditional: file-less (in-memory) sessions have no
     // sidecar to persist, but their state must still survive across turns in
     // this process — otherwise every compress result is dropped and the model
     // re-compresses the same original context forever (issue #322).
-    this.cache.set(key, { state, liveRefOrigins, derivedFrom });
+    this.cache.set(key, { state, liveRefOrigins, derivedFrom, activePack });
     if (!file) return;
     const dir = path.dirname(file);
     await fs.mkdir(dir, { recursive: true }).catch((e: unknown) => {
@@ -115,6 +131,7 @@ export class SessionStateStore {
     try {
       const payload: Record<string, unknown> = { ...state, liveRefOrigins };
       if (derivedFrom) payload.derivedFrom = derivedFrom;
+      if (activePack) payload.activePack = activePack;
       await fs.writeFile(tmp, JSON.stringify(payload), "utf8");
       await fs.rename(tmp, file);
     } catch (e) {
