@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { SessionStateStore, readParentSessionPath } from "../src/state.js";
@@ -311,4 +311,22 @@ test("live ref origins remain isolated across interleaved sessions", async () =>
   assert.deepEqual(store.getLiveRefOrigins(fileA, "a"), [{ rawId: "live-1", identity: "A" }]);
   assert.deepEqual(store.getLiveRefOrigins(fileB, "b"), [{ rawId: "live-0", identity: "B" }]);
   await rm(dir, { recursive: true, force: true });
+});
+
+test("SessionStateStore round-trips activePack through the sidecar", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "acp-state-pack-"));
+  const file = path.join(dir, "session.jsonl");
+  try {
+    const store = new SessionStateStore();
+    await store.load(file, "s1");
+    store.setActivePack(file, "s1", "lean");
+    await store.save(createInitialState(), file, "s1");
+    const raw = JSON.parse(await readFile(file + ".acp.json", "utf8")) as { activePack?: string };
+    assert.equal(raw.activePack, "lean");
+    const reloaded = new SessionStateStore();
+    await reloaded.load(file, "s1");
+    assert.equal(reloaded.getActivePack(file, "s1"), "lean");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

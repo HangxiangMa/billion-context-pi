@@ -54,6 +54,45 @@ export function resolveActivePack(
   return r.resolve(name) ?? defaultPack;
 }
 
+declare const CURRENT_VERSION: string;
+
+const HOST_VERSION: string = (() => {
+  try {
+    return CURRENT_VERSION;
+  } catch {
+    return "dev";
+  }
+})();
+
+export interface SurfaceMeta {
+  pack: string;
+  packVersion?: string;
+  host: string;
+}
+
+/** Surface meta from an already-resolved pack (avoids double resolution
+ *  when the caller already holds the active Pack). */
+export function surfaceMetaOf(pack: Pack, requested: string): SurfaceMeta {
+  const resolved = requested !== "default" && pack.name === requested ? requested : "default";
+  return { pack: resolved, packVersion: pack.version, host: `billion-context-pi ${HOST_VERSION}` };
+}
+
+/** Host-declared surface facts for the kernel's status reports (acp-kernel
+ *  StatusReportMeta). Which pack is active is host policy — the kernel only
+ *  renders what the host declares about the active surface. */
+export function resolveSurfaceMeta(
+  adapter: AdapterConfig,
+  cwd: string,
+  provider?: string,
+  modelId?: string,
+  resolver?: PackResolver,
+): SurfaceMeta {
+  return surfaceMetaOf(
+    resolveActivePack(adapter, cwd, provider, modelId, resolver),
+    resolvePackName(adapter, provider, modelId),
+  );
+}
+
 const ACP_TOOLS: ReadonlySet<string> = new Set(["compress", "decompress", "search_context", "acp_status"]);
 
 export interface PiToolExtras {

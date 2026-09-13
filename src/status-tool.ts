@@ -2,6 +2,7 @@ import { Type, type Static } from "typebox";
 import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
 import { applyToolPromptOverrides, type ToolPromptOverrides } from "./surface.js";
+import { resolveSurfaceMeta } from "./prompt-pack.js";
 import { buildStatusReport, defaultCountTokens, formatRanges, viableRanges } from "acp-kernel";
 import { estimateTokens, collectCoveredMessageIds, collectImageTokens, modelSupportsImages, adjustedTokenCount } from "./tokens.js";
 import { usageAnchorPredatesCompression } from "./floor-stale.js";
@@ -81,12 +82,16 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
   });
   const processed = turn.messages;
 
+  const modelInfo = ctx.model as { provider?: string; id?: string } | undefined;
+  const meta = resolveSurfaceMeta(runtime.adapter, ctx?.cwd ?? process.cwd(), modelInfo?.provider, modelInfo?.id);
+
   const base = buildStatusReport(turn.state, processed, defaultCountTokens, {
     scope: args.scope,
     view: args.view,
     tool: args.tool,
     sort: args.sort,
     limit: args.limit,
+    meta,
   });
 
   // Overview mode additionally surfaces the nudge decision and compressible
