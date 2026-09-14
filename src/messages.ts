@@ -268,7 +268,9 @@ export function coreOutToAgentMessages(
   const emittedSplit = new Set<string>();
   const kernelTextByCallId = new Map<string, string>();
   for (const core of coreOut) {
-    if (core.toolCallId && core.text) kernelTextByCallId.set(core.toolCallId, core.text);
+    if (core.contentType === "tool-call" && core.toolCallId && core.text) {
+      kernelTextByCallId.set(core.toolCallId, core.text);
+    }
   }
 
   for (const core of coreOut) {
