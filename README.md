@@ -79,6 +79,8 @@ That's it. The extension auto-loads on next Pi startup. No configuration needed 
 > **Using another sub-agent extension?** billion-context-pi ships its own `acp_delegate` sub-agent tool (see below) at a fraction of the context cost (~600 tok vs ~7K tok/turn). Two delegation tools in one session only make the model's choice noisier, so pick one:
 > - **Use ACP's delegate** — remove the other extension: `pi remove npm:pi-subagents`
 > - **Keep your own sub-agent** — turn ACP's delegate off in `acp.json`: `{ "delegate": false }` (see *Using your own sub-agent instead* below)
+>
+> If you keep `pi-subagents` installed, billion-context-pi detects it at session start: a **project-level** install (`<cwd>/.pi/npm` or the project extensions dir) automatically stands `acp_delegate` down for that project — a reminder then tells you how to give pi-subagents' agents ACP compression via `/acp-subagents`. A **user-level-only** install (`~/.pi/npm`, user extensions dir) leaves `acp_delegate` active and logs a warning instead. Set `"delegate": { "forceEnable": true }` in `acp.json` to keep `acp_delegate` active regardless of detection.
 
 ## How it works
 

@@ -33,6 +33,13 @@ export interface DelegateConfig {
   /** Enable acp_delegate tools (delegate/wait/cancel) and their system-prompt
    *  section. Default: true. Set `enabled: false` to skip registering them. */
   enabled?: boolean;
+  /** Keep acp_delegate active even when a third-party subagent extension
+   *  (pi-subagents) is installed. Default: false — when pi-subagents is
+   *  detected at session start, acp_delegate stands down (tools, fleet
+   *  shortcut and system-prompt section skipped) to avoid two overlapping
+   *  sub-agent systems, and a reminder points at /acp-subagents so the
+   *  third-party agents can still get ACP compression tools (#415). */
+  forceEnable?: boolean;
   /** How delegate usage is reported back to the main session.
    *  "separate" (default) — delegate tokens tracked in a separate accumulator;
    *  main session totals stay clean, delegate usage shows as its own block in
@@ -94,6 +101,9 @@ export interface DelegateConfig {
  *  corresponding timeout/watchdog is disabled. */
 export interface DelegatePolicy {
   enabled: boolean;
+  /** Resolved delegate.forceEnable (default false): keep acp_delegate even
+   *  when a third-party subagent extension (pi-subagents) is installed (#415). */
+  forceEnable: boolean;
   displayUsage: "merged" | "separate";
   maxDepth: number;
   syncTimeoutMs: number | null;
@@ -114,6 +124,7 @@ export interface DelegatePolicy {
 
 export const DEFAULT_DELEGATE_POLICY: DelegatePolicy = {
   enabled: true,
+  forceEnable: false,
   displayUsage: "separate",
   maxDepth: 2,
   syncTimeoutMs: 5 * 60_000,
@@ -342,13 +353,14 @@ export function resolveDelegate(adapter: AdapterConfig): DelegatePolicy {
     DEFAULT_DELEGATE_POLICY.asyncTimeoutMs!,
   );
   const maxConcurrent = resolveMaxConcurrent(process.env.PI_ACP_DELEGATE_MAX_CONCURRENT, cfg.maxConcurrent);
+  const forceEnable = resolveForceEnable(process.env.PI_ACP_DELEGATE_FORCE_ENABLE, cfg.forceEnable);
   if (idleMs === null) {
     logWarn("config", {
       event: "delegate-idle-watchdog-disabled",
       hint: "no-output watchdog is off; hung async runs must be cancelled manually via acp_delegate_cancel",
     });
   }
-  return { enabled, displayUsage, maxDepth, syncTimeoutMs, idleMs, asyncTimeoutMs, maxConcurrent, thinkingLevel: cfg.thinkingLevel, agents: cfg.agents, notifyIfRead: cfg.notifyIfRead ?? "skip", fleetShortcut: resolveFleetShortcut(cfg.fleetShortcut) };
+  return { enabled, forceEnable, displayUsage, maxDepth, syncTimeoutMs, idleMs, asyncTimeoutMs, maxConcurrent, thinkingLevel: cfg.thinkingLevel, agents: cfg.agents, notifyIfRead: cfg.notifyIfRead ?? "skip", fleetShortcut: resolveFleetShortcut(cfg.fleetShortcut) };
 }
 
 /** Resolve the fleet-inspector TUI shortcut: a string passes through verbatim
@@ -358,6 +370,18 @@ function resolveFleetShortcut(value: unknown): string {
   if (typeof value === "string") return value;
   if (value !== undefined) logWarn("config", { event: "delegate-config-invalid", field: "fleetShortcut", value: String(value), fallback: DEFAULT_FLEET_SHORTCUT });
   return DEFAULT_FLEET_SHORTCUT;
+}
+
+/** Resolve the force-enable override (#415): an explicit env value wins over
+ *  acp.json; anything unparseable falls back to the config value with a logged
+ *  warning rather than failing the session. */
+function resolveForceEnable(envValue: string | undefined, cfgValue: boolean | undefined): boolean {
+  if (envValue === "true") return true;
+  if (envValue === "false") return false;
+  if (envValue !== undefined) {
+    logWarn("config", { event: "delegate-config-invalid", field: "forceEnable", value: envValue, fallback: cfgValue === true });
+  }
+  return cfgValue === true;
 }
 
 function resolveMaxDepth(value: number | string | undefined): number {

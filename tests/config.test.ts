@@ -157,6 +157,49 @@ test("resolveDelegate: boolean shorthand leaves maxConcurrent unlimited", () => 
   assert.equal(r.maxConcurrent, Infinity);
 });
 
+test("resolveDelegate: forceEnable defaults to false", () => {
+  assert.equal(resolveDelegate({}).forceEnable, false);
+  assert.equal(resolveDelegate({ delegate: true }).forceEnable, false);
+  assert.equal(resolveDelegate({ delegate: { enabled: true } }).forceEnable, false);
+});
+
+test("resolveDelegate: forceEnable true is honored; explicit false stays off", () => {
+  assert.equal(resolveDelegate({ delegate: { forceEnable: true } }).forceEnable, true);
+  assert.equal(resolveDelegate({ delegate: { forceEnable: false } }).forceEnable, false);
+});
+
+test("resolveDelegate: PI_ACP_DELEGATE_FORCE_ENABLE overrides acp.json (env > config)", () => {
+  const prev = process.env.PI_ACP_DELEGATE_FORCE_ENABLE;
+  try {
+    process.env.PI_ACP_DELEGATE_FORCE_ENABLE = "true";
+    assert.equal(resolveDelegate({}).forceEnable, true);
+    assert.equal(resolveDelegate({ delegate: { forceEnable: false } }).forceEnable, true);
+    process.env.PI_ACP_DELEGATE_FORCE_ENABLE = "false";
+    assert.equal(resolveDelegate({ delegate: { forceEnable: true } }).forceEnable, false);
+  } finally {
+    if (prev === undefined) delete process.env.PI_ACP_DELEGATE_FORCE_ENABLE;
+    else process.env.PI_ACP_DELEGATE_FORCE_ENABLE = prev;
+  }
+});
+
+test("resolveDelegate: unparseable PI_ACP_DELEGATE_FORCE_ENABLE falls back to the config value", () => {
+  const prev = process.env.PI_ACP_DELEGATE_FORCE_ENABLE;
+  try {
+    process.env.PI_ACP_DELEGATE_FORCE_ENABLE = "maybe";
+    assert.equal(resolveDelegate({}).forceEnable, false);
+    assert.equal(resolveDelegate({ delegate: { forceEnable: true } }).forceEnable, true);
+  } finally {
+    if (prev === undefined) delete process.env.PI_ACP_DELEGATE_FORCE_ENABLE;
+    else process.env.PI_ACP_DELEGATE_FORCE_ENABLE = prev;
+  }
+});
+
+test("resolveDelegate: forceEnable never re-enables an explicitly disabled delegate (priority matrix)", () => {
+  const p = resolveDelegate({ delegate: { enabled: false, forceEnable: true } });
+  assert.equal(p.enabled, false);
+  assert.equal(p.forceEnable, true);
+});
+
 test("resolveDelegate: legacy flat displayUsage still works with boolean delegate", () => {
   const r = resolveDelegate({ delegate: true, displayUsage: "merged" });
   assert.equal(r.enabled, true);

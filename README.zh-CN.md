@@ -78,6 +78,8 @@ pi install npm:billion-context-pi
 > **你另有子代理扩展?** billion-context-pi 自带 `acp_delegate` 子代理工具(见下文),上下文成本极低(~600 tok vs ~7K tok/轮)。同一会话里两套委派工具只会让模型的选择更混乱,二选一:
 > - **用 ACP 的 delegate** —— 卸载另一个扩展:`pi remove npm:pi-subagents`
 > - **保留你自己的子代理** —— 在 `acp.json` 里关掉 ACP 的 delegate:`{ "delegate": false }`(见下文*改用你自己的子代理*)
+>
+> 若保留已安装的 `pi-subagents`,billion-context-pi 会在会话启动时检测:**项目级**安装(`<cwd>/.pi/npm` 或项目内 extensions 目录)会自动停用该项目的 `acp_delegate`,并提醒你运行 `/acp-subagents` 让 pi-subagents 的子代理获得 ACP 压缩;仅**用户级**(全局)安装时只记一条警告日志,`acp_delegate` 保持启用。在 `acp.json` 中设置 `"delegate": { "forceEnable": true }` 可在检测到第三方子代理时仍强制保留 `acp_delegate`。
 
 ## 工作原理
 
