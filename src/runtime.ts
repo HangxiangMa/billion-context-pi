@@ -20,6 +20,7 @@ import { ThrottleEpisode } from "./throttle-retry.js";
 import { logInfo, logWarn, setDebugEnabled } from "./log.js";
 import { findUniqueLongestRun, type MatchRange } from "./sequence-match.js";
 import { OverflowEpisode } from "./overflow-selfheal.js";
+import { lastTurnBoundaryId, type TurnBoundaryPolicy } from "./turn-boundary.js";
 // pi exposes `sessionManager.buildContextEntries()`; omp (oh-my-pi) only has
 // `getBranch()`. Both return chronological SessionEntry[]; feature-detect so
 // the adapter runs under either host (omp's runner silently swallows the TypeError).
@@ -40,6 +41,17 @@ export function readContextEntries(sm: ExtensionContext["sessionManager"]): Sess
 export function isPiHost(sm: ExtensionContext["sessionManager"]): boolean {
   const source = sm as unknown as SessionEntrySource;
   return typeof source.buildContextEntries === "function";
+}
+
+/** #453: key for the compress-retry circuit breaker, derived from PERSISTED
+ *  entries only. On fork hosts the live-merged tail carries volatile live-N
+ *  ids that renumber between context fires (the not-yet-persisted current
+ *  user message), so a breaker keyed on the merged view resets failCount
+ *  mid-episode and never latches (#452 log: cap → inject loop). Persisted
+ *  entry ids are immutable; this key changes only when a genuine new user
+ *  message reaches the session log. pi-native hosts see no change. */
+export function retryBreakerKey(sm: ExtensionContext["sessionManager"], policy?: TurnBoundaryPolicy): string | undefined {
+  return lastTurnBoundaryId(readContextEntries(sm), policy);
 }
 
 /** Minimal identity of a session for state operations that don't need a live
@@ -95,10 +107,12 @@ export interface AcpRuntime {
   clearNudgeTokenStamps(sid: string): void;
   /** Process compress toolResults for the CURRENT user turn only (the caller
    *  scopes the list — see collectCompressOutcomes in src/index.ts); idempotent
-   *  per toolCallId. Outcome classes: isError or noop (0-block panel) →
-   *  failure (count++), success panel (>= 1 block) → reset, other non-error
-    *  text → neutral (count unchanged). Returns the failure count and
-    *  whether the cap was just reached. */
+   *  per toolCallId. turnKey MUST be the stable persisted-boundary key
+   *  (retryBreakerKey) — a key derived from live-merged entries churns under
+   *  fork hosts and resets the counter mid-episode (#453). Outcome classes:
+   *  isError or noop (0-block panel) → failure (count++), success panel
+   *  (>= 1 block) → reset, other non-error text → neutral (count unchanged).
+   *  Returns the failure count and whether the cap was just reached. */
   noteCompressOutcomes(sid: string, turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean }>): { count: number; cappedNow: boolean };
   /** True when this turn already burned MAX_COMPRESS_ATTEMPTS failed/no-op
    *  compress calls — used to stop re-injecting the (dedup-exempt) emergency
