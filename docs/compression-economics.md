@@ -86,6 +86,8 @@ the re-paid tail `T = (1−h)V′`:
 
 Both conventions are used in §3; they bracket the answer and never change its sign.
 
+![Fold position sets the one-time cost](assets/compression-economics/fold-position-vs-onetime-cost.png)
+
 ### 2.3 Per-turn saving after the fold
 
 The original `S` tokens leave the view forever; the `σ`-token summary stays:
@@ -172,11 +174,11 @@ Exact formula:
 ```
 ΔC₁  = 0.9 × 0.67 × 20K + 4×0.05×50K − 0.1×50K
      = 12.06K + 10K − 5K = 17.1K units
-Δs   = 0.95 × 50K × 0.126 = 5.8K units/turn
-n*   = 17.1 / 5.8 ≈ 2.9 turns
+Δs   = 0.95 × 50K × 0.126 = 6.0K units/turn
+n*   = 17.1 / 6.0 ≈ 2.9 turns
 ```
 
-Convention sensitivity: upper-bound pricing gives `n* ≈ 3.2`; using `r` instead of
+Convention sensitivity: upper-bound pricing gives `n* ≈ 3.1`; using `r` instead of
 `r̄` for the saving rate gives `n* ≈ 3.6`; Anthropic-style prices give `n* ≈ 3.8`
 (exact). The earlier hand analysis landed on 4–5 turns using the upper-bound
 convention with per-fold `T` measured from the largest folds. All variants agree on

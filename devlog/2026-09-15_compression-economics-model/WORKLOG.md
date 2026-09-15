@@ -16,7 +16,7 @@
      decreasing in `S` for fixed `h`.
    - Oscillating-regime optimum `S* = sqrt(2·g·(w−r)·(1−h)·Vmin / r̄)` when `qβ > r`.
    - Worked example (`V≈70K, S≈50K, h≈0.33, β=0.05`): `n* ≈ 2.9` turns exact
-     (3.2–3.8 under convention/price variants) ≪ actual `k ≈ 20` → net-positive.
+     (3.1–3.8 under convention/price variants) ≪ actual `k ≈ 20` → net-positive.
 2. Mapped Codex CLI / Claude Code / opencode / Pi-ACP onto `(V̄, S, h)` with stated
    assumptions; computed per-turn costs (9.1 / 13.9 / 13.7 / 7.9 K-units).
 3. Generated 4 charts via `gen.mjs` (SVG→PNG, resvg): break-even curve, fold-position
