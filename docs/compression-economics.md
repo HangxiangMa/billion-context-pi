@@ -276,6 +276,8 @@ every model in §7.2 (or fully custom w/r/q). Live outputs: ΔC₁ (K units and 
 cadence k against n\*. Two live charts: the break-even curve with the cadence line,
 and the steady-state cost curve with S\* and the operating point marked.
 
+Hosted (GitHub Pages, on the PR #448 branch until merge): <https://ranxianglei.github.io/billion-context-pi/estimator/>. After merge, repoint the Pages source to `master`. The file also opens directly from any checkout (no server needed).
+
 ### 7.2 Mainstream model pricing (fetched 2026-09-15)
 
 Source: [BerriAI/litellm](https://github.com/BerriAI/litellm)
