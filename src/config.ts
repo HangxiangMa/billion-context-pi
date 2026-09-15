@@ -2,7 +2,14 @@ import { defaultConfig, type Config, type Prompts } from "acp-kernel";
 import type { CompressReasoningConfig } from "./reasoning-drop.js";
 import type { DegenerationGuardConfig } from "./degeneration.js";
 import type { ThrottleRetryConfig } from "./throttle-retry.js";
+import type { PiPromptSections } from "./system-prompt.js";
+import type { NudgeSectionsConfig, ToolPromptsConfig } from "./surface.js";
 import { logWarn } from "./log.js";
+
+/** Default TUI shortcut for the acp_delegate fleet inspector. Moved off
+ *  "ctrl+alt+f" (also claimed by pi-subagents) to avoid a cross-extension
+ *  conflict Pi's loader only warns about — last-loaded silently wins (#412). */
+export const DEFAULT_FLEET_SHORTCUT = "ctrl+alt+d";
 
 /** Per-role delegate defaults. Lets long-lived automation pin a cheaper or
  *  more capable model and a thinking level per delegate role, so the main
@@ -26,6 +33,13 @@ export interface DelegateConfig {
   /** Enable acp_delegate tools (delegate/wait/cancel) and their system-prompt
    *  section. Default: true. Set `enabled: false` to skip registering them. */
   enabled?: boolean;
+  /** Keep acp_delegate active even when a third-party subagent extension
+   *  (pi-subagents) is installed. Default: false — when pi-subagents is
+   *  detected at session start, acp_delegate stands down (tools, fleet
+   *  shortcut and system-prompt section skipped) to avoid two overlapping
+   *  sub-agent systems, and a reminder points at /acp-subagents so the
+   *  third-party agents can still get ACP compression tools (#415). */
+  forceEnable?: boolean;
   /** How delegate usage is reported back to the main session.
    *  "separate" (default) — delegate tokens tracked in a separate accumulator;
    *  main session totals stay clean, delegate usage shows as its own block in
@@ -73,6 +87,13 @@ export interface DelegateConfig {
    *  saw the result, so re-injecting it would only waste context.
    *  "always" — always inject the notification (previous behavior). */
   notifyIfRead?: "skip" | "always";
+  /** Keybinding for the interactive TUI shortcut that opens the acp_delegate
+   *  fleet inspector (live list + transcript). Default: "ctrl+alt+d". Set to
+   *  "" (empty string) to disable keyboard registration entirely — the
+   *  inspector stays reachable via /acp-fleet. Moved off the previous hardcoded
+   *  "ctrl+alt+f" because pi-subagents also claims ctrl+alt+f, and Pi's loader
+   *  only warns + last-loaded-wins on cross-extension conflicts (#412). */
+  fleetShortcut?: string;
 }
 
 /** Resolved delegate policy: what actually takes effect after merging acp.json,
@@ -80,6 +101,9 @@ export interface DelegateConfig {
  *  corresponding timeout/watchdog is disabled. */
 export interface DelegatePolicy {
   enabled: boolean;
+  /** Resolved delegate.forceEnable (default false): keep acp_delegate even
+   *  when a third-party subagent extension (pi-subagents) is installed (#415). */
+  forceEnable: boolean;
   displayUsage: "merged" | "separate";
   maxDepth: number;
   syncTimeoutMs: number | null;
@@ -94,10 +118,13 @@ export interface DelegatePolicy {
   /** Whether to suppress the completion notification when the model already
    *  read the result file after the run finished. Always resolved ("skip" default). */
   notifyIfRead: "skip" | "always";
+  /** Resolved TUI shortcut for the fleet inspector ("" = registration disabled). */
+  fleetShortcut: string;
 }
 
 export const DEFAULT_DELEGATE_POLICY: DelegatePolicy = {
   enabled: true,
+  forceEnable: false,
   displayUsage: "separate",
   maxDepth: 2,
   syncTimeoutMs: 5 * 60_000,
@@ -105,6 +132,7 @@ export const DEFAULT_DELEGATE_POLICY: DelegatePolicy = {
   asyncTimeoutMs: 30 * 60_000,
   maxConcurrent: Infinity,
   notifyIfRead: "skip",
+  fleetShortcut: DEFAULT_FLEET_SHORTCUT,
 };
 
 /** Compression tuning fields, shared by all three levels (global, provider,
@@ -135,6 +163,13 @@ export interface CompressSettings {
    *  tool calls — see CompressReasoningConfig in src/reasoning-drop.ts.
    *  Merged field-wise (drop, threshold) across the three levels. */
   reasoning?: CompressReasoningConfig;
+  /** Active prompt pack name (see CONFIGURATION.md “Prompt packs”). Base
+   *  level; override per provider/model via `providers`. "default" or unset =
+   *  built-in defaults. Resolved per request against the live model, so
+   *  switching models mid-session switches the pack. Packs ship text-level
+   *  overrides only; a pack's `toolPrompts` follow the base selection (tool
+   *  definitions freeze at extension load, before the model is known). */
+  promptPack?: string;
 }
 
 /** Per-provider compression overrides. Carries the same tuning fields as the
@@ -212,13 +247,13 @@ export interface AdapterConfig {
    *  unbounded behavior). */
   toolBashDefaultTimeout?: number;
   /** Hard byte cap applied to tool result text via the `tool_result` hook.
-   *  Default: 200000 (~200KB, roughly 5000 lines at ~40 bytes/line) — a
-   *  generous ceiling that stops runaway output. Pi already caps bash/read/grep
-   *  at 50KB/2000 lines (bash full output is saved to a temp file), so this
-   *  default mainly caps tools Pi doesn't cap. Set lower (e.g. 8192) for a
-   *  tighter context budget, or 0 to disable. When capped, oversized text is
-   *  head-truncated with a notice telling the model how to see the full output
-   *  (bash: read BashToolDetails.fullOutputPath). */
+   *  Default: 50000 (~50KB) — aligned with Pi's own bash/read/grep cap so
+   *  every tool path lands under one ceiling; the net still catches runaway
+   *  output from tools Pi does not cap (MCP/custom). Set higher for large
+   *  MCP outputs, lower (e.g. 8192) for a tighter context budget, or 0 to
+   *  disable. When capped, oversized text is head-truncated with a notice
+   *  telling the model how to see the full output (bash: read
+   *  BashToolDetails.fullOutputPath). */
   toolOutputMaxBytes?: number;
   /** Delegate sub-agent config. Accepts a boolean shorthand (`true` →
    *  `{ enabled: true }`, `false` → `{ enabled: false }`) or a DelegateConfig
@@ -251,6 +286,14 @@ export interface AdapterConfig {
    *  boolean shorthand (`false` disables) or an object. Default: enabled,
    *  minRun=200. */
   degenerationGuard?: boolean | DegenerationGuardConfig;
+  /** Host multi-session turn-boundary policy (#364). Accepts a boolean
+   *  shorthand (`true` → count host-injected custom_message entries as turn
+   *  boundaries) or a HostSessionConfig object. Default: off — pi-native
+   *  behavior where only genuine user-role messages start a turn, so existing
+   *  single-session users' nudge cadence is unchanged. Enable for inline
+   *  multi-session hosts (Prime RLM & co.) whose injected agent messages must
+   *  delimit real turns. See docs/host-adapter.md. */
+  hostSession?: boolean | HostSessionConfig;
   /** Legacy flat alias for `delegate.displayUsage`. Kept for backward
    *  compatibility with existing acp.json files. Prefer `delegate.displayUsage`. */
   displayUsage?: "merged" | "separate";
@@ -263,11 +306,26 @@ export interface AdapterConfig {
    *  replacing the kernel's tuned compression rules may reduce summary quality
    *  (lost paths/signatures/decisions → worse retrieval). */
   acknowledgePromptsRisk?: boolean;
+  /** Override structural sections of the ACP system prompt (ACP TAGS, TOOLS,
+   *  WHEN TO COMPRESS, ...). Tri-state per section: string = replace, null =
+   *  remove, omitted = default. Not risk-gated — these are documentation
+   *  sections, not compression rules. Set via acp.json. */
+  promptSections?: Partial<PiPromptSections>;
+  /** Override guidance-class nudge texts (efficiencyNote, emergencyHeader,
+   *  t2Guidance, t3Guidance). Same tri-state semantics. Not risk-gated. */
+  nudgeSections?: NudgeSectionsConfig;
+  /** Override the four ACP tool definitions' LLM-facing text (description,
+   *  paramDescriptions, promptSnippet, promptGuidelines). Read synchronously
+   *  at extension load — tool defs are frozen at registration time. */
+  toolPrompts?: ToolPromptsConfig;
+  /** Replace (string) or remove (null) the ACP_DELEGATE_NOTIFICATIONS appendix
+   *  injected when the delegate tool is enabled. */
+  delegatePrompt?: string | null;
   coreOverrides?: Partial<Config>;
 }
 
 export const DEFAULT_TOOL_BASH_TIMEOUT = 60;
-export const DEFAULT_TOOL_OUTPUT_MAX_BYTES = 200_000;
+export const DEFAULT_TOOL_OUTPUT_MAX_BYTES = 50_000;
 
 /** Resolve delegate config from the adapter, handling the boolean shorthand
  *  and the legacy flat `displayUsage` alias. Precedence: env > acp.json >
@@ -295,13 +353,35 @@ export function resolveDelegate(adapter: AdapterConfig): DelegatePolicy {
     DEFAULT_DELEGATE_POLICY.asyncTimeoutMs!,
   );
   const maxConcurrent = resolveMaxConcurrent(process.env.PI_ACP_DELEGATE_MAX_CONCURRENT, cfg.maxConcurrent);
+  const forceEnable = resolveForceEnable(process.env.PI_ACP_DELEGATE_FORCE_ENABLE, cfg.forceEnable);
   if (idleMs === null) {
     logWarn("config", {
       event: "delegate-idle-watchdog-disabled",
       hint: "no-output watchdog is off; hung async runs must be cancelled manually via acp_delegate_cancel",
     });
   }
-  return { enabled, displayUsage, maxDepth, syncTimeoutMs, idleMs, asyncTimeoutMs, maxConcurrent, thinkingLevel: cfg.thinkingLevel, agents: cfg.agents, notifyIfRead: cfg.notifyIfRead ?? "skip" };
+  return { enabled, forceEnable, displayUsage, maxDepth, syncTimeoutMs, idleMs, asyncTimeoutMs, maxConcurrent, thinkingLevel: cfg.thinkingLevel, agents: cfg.agents, notifyIfRead: cfg.notifyIfRead ?? "skip", fleetShortcut: resolveFleetShortcut(cfg.fleetShortcut) };
+}
+
+/** Resolve the fleet-inspector TUI shortcut: a string passes through verbatim
+ *  ("" disables registration); a non-string falls back to the default with a
+ *  logged warning rather than failing the session (#412). */
+function resolveFleetShortcut(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value !== undefined) logWarn("config", { event: "delegate-config-invalid", field: "fleetShortcut", value: String(value), fallback: DEFAULT_FLEET_SHORTCUT });
+  return DEFAULT_FLEET_SHORTCUT;
+}
+
+/** Resolve the force-enable override (#415): an explicit env value wins over
+ *  acp.json; anything unparseable falls back to the config value with a logged
+ *  warning rather than failing the session. */
+function resolveForceEnable(envValue: string | undefined, cfgValue: boolean | undefined): boolean {
+  if (envValue === "true") return true;
+  if (envValue === "false") return false;
+  if (envValue !== undefined) {
+    logWarn("config", { event: "delegate-config-invalid", field: "forceEnable", value: envValue, fallback: cfgValue === true });
+  }
+  return cfgValue === true;
 }
 
 function resolveMaxDepth(value: number | string | undefined): number {
@@ -366,6 +446,37 @@ export function resolveRepetitionGuard(adapter: AdapterConfig): { enabled: boole
   return { enabled: true, warn: REPETITION_GUARD_DEFAULTS.warn, abort: REPETITION_GUARD_DEFAULTS.abort };
 }
 
+/** Host multi-session turn-boundary policy (#364). See TurnBoundaryPolicy in
+ *  src/turn-boundary.ts for the semantics this resolves. */
+export interface HostSessionConfig {
+  /** Count host-injected custom_message entries (agent_message) as turn
+   *  boundaries. Default: false (pi-native behavior). */
+  countCustomMessages?: boolean;
+}
+
+export interface ResolvedHostSession {
+  countCustomMessages: boolean;
+}
+
+/** Resolve the host-session turn-boundary policy from the adapter, handling
+ *  the boolean shorthand (`true` enables countCustomMessages). Invalid values
+ *  fall back to the pi-native default (off) with a logged warning — they never
+ *  fail the session. */
+export function resolveHostSession(adapter: AdapterConfig): ResolvedHostSession {
+  const h = adapter.hostSession;
+  if (h === true) return { countCustomMessages: true };
+  if (h && typeof h === "object") {
+    if (typeof h.countCustomMessages !== "boolean") {
+      logWarn("config", { event: "host-session-invalid", field: "countCustomMessages", value: String(h.countCustomMessages), fallback: "false" });
+    }
+    return { countCustomMessages: h.countCustomMessages === true };
+  }
+  if (h !== undefined && h !== false) {
+    logWarn("config", { event: "host-session-invalid", value: String(h), fallback: "off" });
+  }
+  return { countCustomMessages: false };
+}
+
 /** Per-field deepest-wins merge of the three compression levels (global →
  *  provider → model). An undefined field at a deeper level does NOT clear a
  *  value set at a shallower level — only a defined value overrides. */
@@ -383,6 +494,7 @@ export function mergeCompress(
       drop: model?.reasoning?.drop ?? provider?.reasoning?.drop ?? global?.reasoning?.drop,
       threshold: model?.reasoning?.threshold ?? provider?.reasoning?.threshold ?? global?.reasoning?.threshold,
     },
+    promptPack: model?.promptPack ?? provider?.promptPack ?? global?.promptPack,
   };
 }
 

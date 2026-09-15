@@ -1,12 +1,15 @@
 import type { ExtensionAPI, ExtensionCommandContext, RegisteredCommand, SessionEntry } from "@earendil-works/pi-coding-agent";
+import * as path from "node:path";
 import type { AcpRuntime } from "./runtime.js";
-import { ACP_STATUS_CUSTOM_TYPE } from "./messages.js";
+import { ACP_STATUS_CUSTOM_TYPE, ACP_EXPORT_CUSTOM_TYPE } from "./messages.js";
+import { exportSession, parseExportArgs } from "./export.js";
 import { defaultCountTokens, parseBlockIdArg, collectBlockContent } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
 import { collectCoveredMessageIds, estimateTokens, collectImageTokens, modelSupportsImages, adjustedTokenCount } from "./tokens.js";
 import { usageAnchorPredatesCompression } from "./floor-stale.js";
 import { applyOutputHeadroom, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
 import { buildStatusPanel } from "acp-kernel/panel";
+import { resolveSurfaceMeta } from "./prompt-pack.js";
 import { getDelegateUsage } from "./delegate-tool.js";
 import { openFleetInspector } from "./fleet-inspector.js";
 import { resolveDelegate } from "./config.js";
@@ -55,6 +58,42 @@ export function makeCommands(runtime: AcpRuntime, pi?: ExtensionAPI): Array<{ na
       options: {
         description: "Detailed ACP status (block tiers, token breakdown, delegate usage).",
         handler: statusHandler,
+      },
+    },
+    {
+      name: "acp-export",
+      options: {
+        description:
+          "Export a session as a handoff markdown doc (folded view by default). " +
+          "Usage: /acp-export [session-id|label] [--full] [--output handoff.md]",
+        handler: async (args, ctx) => {
+          const parsed = parseExportArgs(args);
+          if (parsed.error) {
+            ctx.ui.notify(parsed.error);
+            return;
+          }
+          const sessionDir = resolveSessionDir(ctx.sessionManager);
+          if (!sessionDir) {
+            ctx.ui.notify("No session directory available for export.");
+            return;
+          }
+          let result: string;
+          try {
+            result = await exportSession(parsed.selector, { full: parsed.full, output: parsed.output }, sessionDir);
+          } catch (e) {
+            ctx.ui.notify(e instanceof Error ? e.message : String(e), "error");
+            return;
+          }
+          if (parsed.output) {
+            ctx.ui.notify(result);
+            return;
+          }
+          if (typeof pi?.sendMessage === "function") {
+            pi.sendMessage({ customType: ACP_EXPORT_CUSTOM_TYPE, content: result, display: true });
+            return;
+          }
+          ctx.ui.notify(result);
+        },
       },
     },
     {
@@ -141,6 +180,13 @@ export function makeCommands(runtime: AcpRuntime, pi?: ExtensionAPI): Array<{ na
   ];
 }
 
+function resolveSessionDir(sm: ExtensionCommandContext["sessionManager"]): string | undefined {
+  const dir = typeof sm.getSessionDir === "function" ? sm.getSessionDir() : undefined;
+  if (dir) return dir;
+  const file = sm.getSessionFile();
+  return file ? path.dirname(file) : undefined;
+}
+
 async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): Promise<string> {
   const { state, coreMessages, entries } = await runtime.stateFor(ctx);
   // Measure every panel percentage against the SAME real request limit the live
@@ -176,7 +222,9 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   // systemPromptTokens (measured) and unprunedTokens — the chars/4 estimate
   // of the full projection, so the kit derives Session-only on the same
   // estimation scale as the sent view (never cross-scale; omp issue #18).
-  const versionStr = CURRENT_VERSION ? `billion-context-pi@${CURRENT_VERSION}` : undefined;
+  const versionStr = CURRENT_VERSION
+    ? `billion-context-pi@${CURRENT_VERSION} · pack: ${resolveSurfaceMeta(runtime.adapter, ctx?.cwd ?? process.cwd(), (ctx?.model as { provider?: string; id?: string } | undefined)?.provider, (ctx?.model as { provider?: string; id?: string } | undefined)?.id).pack}`
+    : undefined;
   let text = buildStatusPanel({
     version: versionStr,
     tokenCount: sessionTokens,

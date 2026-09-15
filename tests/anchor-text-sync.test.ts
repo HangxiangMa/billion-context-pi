@@ -169,3 +169,32 @@ test("tag-prefixed kernel text still syncs (first-{ scan, prefix dropped from ar
   assert.equal(content.length, 1, "JSON after tag prefix synced");
   assert.equal((content[0] as { summary: string }).summary, STUB_SUMMARY);
 });
+
+test("tool-result cores must not overwrite call-args in multi-call reconstruction (#440)", () => {
+  const bashArgs = { command: "ls -la" };
+  const grepArgs = { pattern: "foo" };
+  const original = msgEntry("a", {
+    role: "assistant",
+    content: [
+      { type: "text", text: "Running tools" },
+      { type: "toolCall", id: "tcA", name: "bash", arguments: bashArgs },
+      { type: "toolCall", id: "tcB", name: "grep", arguments: grepArgs },
+    ],
+    ...assistantMeta(),
+  }).message;
+  const originalById = new Map([["a", original]]);
+  const coreOut: CoreMessage[] = [
+    { id: "a#tcA", role: "assistant", contentType: "tool-call", toolName: "bash", toolCallId: "tcA", text: JSON.stringify(bashArgs) },
+    { id: "a#tcB", role: "assistant", contentType: "tool-call", toolName: "grep", toolCallId: "tcB", text: JSON.stringify(grepArgs) },
+    // Tool-results share the same toolCallIds and carry JSON-object outputs.
+    { id: "rA", role: "tool", contentType: "tool-result", toolName: "bash", toolCallId: "tcA", text: JSON.stringify({ total: 5, files: ["a.txt"] }) },
+    { id: "rB", role: "tool", contentType: "tool-result", toolName: "grep", toolCallId: "tcB", text: JSON.stringify({ matches: ["line42: foo"] }) },
+  ];
+
+  const out = coreOutToAgentMessages(coreOut, originalById);
+  const calls = callsOf(out[0]);
+  const bash = calls.find((c) => c.name === "bash")!;
+  const grep = calls.find((c) => c.name === "grep")!;
+  assert.deepEqual(bash.arguments, bashArgs, "bash args must not be replaced by its result output");
+  assert.deepEqual(grep.arguments, grepArgs, "grep args must not be replaced by its result output");
+});
