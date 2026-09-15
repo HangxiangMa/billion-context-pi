@@ -34,7 +34,7 @@
   "modelContextLimit": 200000,
   "outputHeadroomMaxPct": 0.25,
   "toolBashDefaultTimeout": 60,
-  "toolOutputMaxBytes": 200000,
+  "toolOutputMaxBytes": 50000,
 
   "throttleRetry": {
     "enabled": true,
@@ -63,7 +63,32 @@
 }
 ```
 
-覆盖内核压缩提示词规则的高级配置（需要风险确认）。只设置你想改的字段，其余继承内核默认值：
+### 微调压缩提示词
+
+三个层级，从最轻到最重——用第一个够用的即可：
+
+**1. 选一个提示词包——一行搞定，无需风险确认。**[提示词包](#提示词包)把一整套调好的表面（系统提示词各节、nudge 文本、工具描述、压缩规则）打包在一起：
+
+```json
+{ "compress": { "promptPack": "lean" } }
+```
+
+内置包：`default`（完整表面）和 `lean`（约省 76%——适合会把工具 schema 原样抄进回答的小模型）。同一个键也可以走标准 `compress` 级联按 provider / 按 model 选包。
+
+**2. 逐项微调——三态，无需风险确认。**`promptSections`、`nudgeSections`、`toolPrompts` 覆盖表面的单个部分：**字符串替换**、`null` 删除、省略键保持默认。内联值优先于包的值：
+
+```json
+{
+  "compress": { "promptPack": "lean" },
+  "promptSections": { "whenToCompress": "（你的替换文本）" },
+  "nudgeSections": { "efficiencyNote": null },
+  "toolPrompts": { "compress": { "description": "把一段对话压缩成摘要。" } }
+}
+```
+
+逐键参考：[提示词自定义](#提示词自定义)。
+
+**3. 逐字替换内核压缩规则——需风险确认。**四个 `prompts.*` 字段是决定摘要*怎么写*的核心规则；替换它们可能悄悄降低摘要质量，因此需要显式确认。只设置你想改的字段，其余继承内核默认值：
 
 ```json
 {
@@ -100,16 +125,18 @@
 | `modelContextLimit` | number | *(自动)* | 🟢 ACTIVE | 覆盖上下文窗口大小（token 数）。 |
 | `outputHeadroomMaxPct` | number \| string | `0.25` | 🟢 ACTIVE | 输出预留（output headroom）占上下文窗口的比例上限。 |
 | `toolBashDefaultTimeout` | number | `60` | 🟢 ACTIVE | 模型省略 `timeout` 时注入 bash 工具的默认超时秒数。 |
-| `toolOutputMaxBytes` | number | `200000` | 🟢 ACTIVE | 工具返回文本的硬性字节上限。 |
+| `toolOutputMaxBytes` | number | `50000` | 🟢 ACTIVE | 工具返回文本的硬性字节上限。 |
 | `throttleRetry` | boolean \| object | `true` | 🟢 ACTIVE | 自动重试 provider 侧 token 限流错误（递进退避）。 |
 | `repetitionGuard` | boolean \| object | `true` | 🟢 ACTIVE | 打断字节级完全相同的工具调用死循环（连续 3 次告警，连续 5 次拦截并中止本轮）。 |
 | `degenerationGuard` | boolean \| object | `true` | 🟢 ACTIVE | 折叠出站视图中 assistant text/thinking 里的单字符退化连击（如 4655×「【」）并注入一次性恢复通知——打破 pi 每轮请求都回传退化 thinking 导致的连环 abort 死循环（#351）。 |
+| `hostSession` | boolean \| object | `false` | 🟢 ACTIVE | 多会话宿主的回合边界策略：是否把注入的 `custom_message` 计为回合起点。默认关闭（pi 原生行为）。 |
 
 **delegate 键**
 
 | 键 | 类型 | 默认值 | 状态 | 说明 |
 |----|------|--------|------|------|
 | `delegate.enabled` | boolean | `true` | 🟢 ACTIVE | 启用 `acp_delegate` 工具及其系统提示部分。 |
+| `delegate.forceEnable` | boolean | `false` | 🟢 ACTIVE | 检测到**项目级** `pi-subagents` 安装时仍保留 `acp_delegate`（默认：自动停用；仅用户级安装只记警告日志）。可被 `PI_ACP_DELEGATE_FORCE_ENABLE` 覆盖。 |
 | `delegate.displayUsage` | string | `"separate"` | 🟢 ACTIVE | 控制 delegate 子代理的 token 用量如何报回主会话。 |
 | `delegate.maxDepth` | number | `2` | 🟢 ACTIVE | `acp_delegate` 最大嵌套深度（主会话 = 深度 0；处于该深度的会话成为叶子，不能再委派）。设为 `1` 可禁止 delegate 再嵌套。 |
 | `delegate.syncTimeoutMinutes` | number | `5` | 🟢 ACTIVE | **同步** `acp_delegate` 调用的硬超时（分钟）。`0` / `null` 禁用。 |
@@ -118,6 +145,7 @@
 | `delegate.maxConcurrent` | number | unlimited | 🟢 ACTIVE | 同时运行的后台（`async`）delegate 上限；超出的启动按 FIFO 排队，有空位时自动开始。`1` = 强制串行。可被 `PI_ACP_DELEGATE_MAX_CONCURRENT` 覆盖。 |
 | `delegate.thinkingLevel` | string | _（未设置）_ | 🟢 ACTIVE | delegate 全局默认 thinking level（per-call > 角色 > 全局 > Pi 默认）。 |
 | `delegate.agents` | object | _（未设置）_ | 🟢 ACTIVE | 按角色配置默认模型 + thinking level，以角色名为键。 |
+| `delegate.fleetShortcut` | string | `ctrl+alt+d` | 🟢 ACTIVE | `acp_delegate` fleet inspector 的 TUI 快捷键；设为 `""` 可关闭注册。 |
 
 **provider 限流重试键**
 
@@ -154,6 +182,11 @@
 |----|------|--------|------|------|
 | `prompts` | object | *(内核默认)* | 🟢 ACTIVE | 覆盖 acp-kernel 的 4 条承重压缩提示词规则。每个设置的字段逐字替换默认值。 |
 | `acknowledgePromptsRisk` | boolean | `false` | 🟢 ACTIVE | 必须为 `true`，`prompts` 覆盖才会生效；否则覆盖被丢弃、使用默认值。 |
+| `promptSections` | object | *(内置默认)* | 🟢 ACTIVE | 覆盖 ACP 系统提示词的 13 个段（含 4 个压缩规则块）（三态：字符串=替换 / null=删除 / 省略=默认）。不经风险门禁。 |
+| `nudgeSections` | object | *(内置默认)* | 🟢 ACTIVE | 覆盖压缩提示的 4 段引导类文本（efficiencyNote / emergencyHeader / t2Guidance / t3Guidance），同样三态。不经风险门禁。 |
+| `toolPrompts` | object | *(内置默认)* | 🟢 ACTIVE | 覆盖四个 ACP 工具的 LLM 文案（description / paramDescriptions / promptSnippet / promptGuidelines）。扩展加载时同步读取，改后需重启 pi。 |
+| `delegatePrompt` | string \| null | *(内置附录)* | 🟢 ACTIVE | 替换（string）或删除（null）delegate 启用时的 ACP_DELEGATE_NOTIFICATIONS 系统提示词附录。 |
+| `promptPack` | string | `default` | 🟢 ACTIVE | 选择具名[提示词包](#提示词包)（如内置 `lean`）——一行替代整块内联 `promptSections`/`toolPrompts` JSON；作为内联覆盖之下的基础层生效。 |
 
 **环境变量**
 
@@ -163,10 +196,12 @@
 | `ACP_MODEL_CONTEXT_LIMIT` | 覆盖上下文窗口大小（优先级最高）。 |
 | `ACP_DEBUG` | 设为 `1` / `true` 开启调试日志。 |
 | `ACP_LOG_FILE` | 覆盖日志文件路径（默认 `~/.pi/acp.log`）。 |
+| `PI_ACP_FORK_HOST` | 设为 `1` / `true` 声明当前宿主是兼容 Pi 的 fork（无 `buildContextEntries()`），使其被识别为受支持宿主。OMP 默认仍被拒绝。见 [docs/host-adapter.md](./docs/host-adapter.md)。 |
 | `PI_ACP_DELEGATE_MAX_DEPTH` | 覆盖 `delegate.maxDepth`。 |
 | `PI_ACP_DELEGATE_SYNC_TIMEOUT_MINUTES` | 覆盖 `delegate.syncTimeoutMinutes`；`0` 禁用同步硬超时。 |
 | `PI_ACP_DELEGATE_IDLE_TIMEOUT_MINUTES` | 覆盖 `delegate.idleTimeoutMinutes`；`0` 禁用闲置看门狗。 |
 | `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES` | 覆盖 `delegate.asyncTimeoutMinutes`；`0` 禁用异步硬上限。 |
+| `PI_ACP_DELEGATE_FORCE_ENABLE` | 覆盖 `delegate.forceEnable`；取值 `true` / `false`。 |
 
 > **只有文档中列出的键才会从 `acp.json` 读取。** 其他调优参数（`preserveRecentMessages`、`protectedTools`）是代码级别的，不开放给用户。三个压缩阈值构成三级递进：基于增长的软 nudge → 越过 `compress.maxContextLimit` 后的强制 nudge → 越过 `compress.emergencyThresholdPercent` 后的紧急截断。
 
@@ -214,9 +249,9 @@
 ### `toolOutputMaxBytes`
 
 - **类型：** `number`
-- **默认值：** `200000`
+- **默认值：** `50000`
 - **状态：** 🟢 ACTIVE
-- **说明：** 通过 `tool_result` 钩子对工具返回文本施加的硬性字节上限（约 200KB，约 5000 行）。它拦截 Pi 自身上限无法覆盖的失控输出（例如 Pi 不做限制的工具）。触发上限时，超长文本会被头部截断，并附带提示告知模型如何查看完整输出。设小一些（如 `8192`）可收紧上下文预算，设为 `0` 则完全禁用。
+- **说明：** 通过 `tool_result` 钩子对工具返回文本施加的硬性字节上限（约 50KB，约 1250 行）。与 Pi 自身对 bash/read/grep 的上限对齐——所有工具路径统一一条天花板；对 Pi 不做限制的工具（MCP/自定义）仍能拦截失控输出。触发上限时，超长文本会被头部截断，并附带提示告知模型如何查看完整输出。需要更大输出时调高、设小一些（如 `8192`）可收紧上下文预算，设为 `0` 则完全禁用。
 
 ---
 
@@ -233,7 +268,18 @@
 - **类型：** `boolean`
 - **默认值：** `true`
 - **状态：** 🟢 ACTIVE
-- **说明：** 启用 `acp_delegate` 工具（`acp_delegate`、`acp_delegate_wait`、`acp_delegate_cancel`）及其对应的系统提示部分。设为 `false` 可完全跳过注册——例如你使用了其他子代理扩展，或者在无头环境下运行时异步结果注入没有意义。
+- **说明：** 启用 `acp_delegate` 工具（`acp_delegate`、`acp_delegate_wait`、`acp_delegate_cancel`）及其对应的系统提示部分。设为 `false` 可完全跳过注册——例如你使用了其他子代理扩展，或者在无头环境下运行时异步结果注入没有意义。保留自带子代理的完整步骤见 [README.zh-CN.md](./README.zh-CN.md) 的 **改用你自己的子代理**。
+- **生效时机：** 三个工具在会话启动时注册，因此改动在**下一个会话**（或重启 Pi）生效。系统提示段每回合实时解析，可能在工具之前先于会话内消失。
+- **只关提示段：** `delegatePrompt: null` 移除 `ACP_DELEGATE NOTIFICATIONS` 段但保留工具。
+- **不能替代：** Pi 原生的 `--exclude-tools acp_delegate,acp_delegate_wait,acp_delegate_cancel` 只隐藏工具、**不**隐藏系统提示段，会让模型被告知它调不到的工具。
+
+### `delegate.forceEnable`
+
+- **类型：** `boolean`
+- **默认值：** `false`
+- **状态：** 🟢 ACTIVE
+- **说明：** 检测到第三方 [`pi-subagents`](https://github.com/nicobailon/pi-subagents) 扩展的**项目级**安装（`<cwd>/.pi/npm/node_modules/pi-subagents` 或 `<cwd>/.pi/extensions/`）时仍保留 `acp_delegate`。默认（`false`）下，会话启动检测到项目级安装会自动停用 `acp_delegate`——两个扩展各带一套重叠的子代理系统（各自的 fleet 检查器、spawn 路径，以及 #412 背后的 inspector 快捷键冲突），两套 fleet 并存会让模型困惑。**仅用户级**（全局，`~/.pi/npm`、用户 extensions 目录）安装不会停用 `acp_delegate`，只记一条警告日志——避免一次全局安装让所有项目都失去 acp_delegate。停用时会打印醒目提醒：说明 pi-subagents 的子代理默认拿不到 ACP 上下文压缩，运行 `/acp-subagents` 可把 compress / decompress / search_context / acp_status 注入其 agent overrides。优先级：显式 `delegate.enabled: false` 永远赢过 `forceEnable`；env `PI_ACP_DELEGATE_FORCE_ENABLE` 覆盖本键。
+- **生效时机：** 与 `delegate.enabled` 相同——工具与快捷键在会话启动时注册，改动在**下一个会话**生效；系统提示段每回合实时解析，可能在工具之前先于会话内消失。
 
 ### `delegate.displayUsage`
 
@@ -307,6 +353,12 @@
 }
 ```
 
+### `delegate.fleetShortcut`
+
+- **类型：** 字符串——任意 Pi 键位（如 `"ctrl+alt+d"`、`"ctrl+shift+f"`）；空字符串 `""` 表示不注册快捷键
+- **默认值：** `ctrl+alt+d`
+- **状态：** 🟢 ACTIVE
+- **说明：** TUI **fleet inspector**（运行中 / 已结束的 `acp_delegate` run 的实时列表 + 会话转录）的键盘快捷键。默认键已从 `ctrl+alt+f` 挪开，因为该组合键同时被 `pi-subagents` 扩展占用——Pi 加载器既不去重跨扩展的快捷键冲突、也不允许用户覆盖，两者会争抢同一按键（#412）。无论此设置如何，fleet inspector 始终可通过 `/acp-fleet` 打开。设为 `""` 则完全不注册快捷键（例如你依赖其他扩展的 fleet 界面时）。非法值会注册一个永不触发的绑定，而不会导致启动失败。
 
 ---
 
@@ -477,6 +529,38 @@
 
 ---
 
+## 宿主多会话
+
+`hostSession` 键控制**回合边界判定**，面向在单进程内运行多个会话的宿主（如 Prime 的内联 RLM 子/兄弟会话）。完整契约——包括子会话状态派生（`deriveChildState`）——见 **[docs/host-adapter.md](./docs/host-adapter.md)**。
+
+**背景。** ACP 的按回合账本（nudge 已展示追踪、compress 重试上限、结果归口）以"当前回合起点"为键。pi 原生语义下，只有真正的 user-role 消息开启新回合。内联多会话宿主还会把 agent 回合以 `custom_message` 条目注入会话日志；这些条目会进入 LLM 上下文（pi 原生投影），但在默认策略下**不开启回合**——多个真实宿主回合塌缩进同一个 turnKey：nudge 节奏格子错位、按回合 compress 重试上限跨回合失真、节流/溢出周期统计失真。适配器中所有回合边界判定都走同一谓词 `isTurnBoundary(entry, policy)`（`src/turn-boundary.ts`）。
+
+### `hostSession`
+
+- **类型：** boolean \| object
+- **默认值：** `false`（关闭）
+- **状态：** 🟢 ACTIVE
+- **说明：** 宿主注入消息的回合边界策略。`hostSession: true` 等价于 `{ "countCustomMessages": true }`。object 形式（任意子集）：
+
+  ```json
+  {
+    "hostSession": {
+      "countCustomMessages": true
+    }
+  }
+  ```
+
+  **默认关闭保证存量单会话行为逐字节不变**——只有当你的宿主确实向会话日志注入 agent 回合时才启用。
+
+### `hostSession.countCustomMessages`
+
+- **类型：** boolean
+- **默认值：** `false`
+- **状态：** 🟢 ACTIVE
+- **说明：** 把宿主注入的非空文本 `custom_message` 条目（UI-only 的 `acp-status` 面板除外）计为所有按回合账本的回合起点；空内容注入是纯控制信号，不开启回合。不改变 LLM 上下文投影——这些条目的 user-role 投影本就是 pi 原生行为。
+
+---
+
 ## 压缩调优
 
 `compress` 子对象包含三个阈值，构成上下文管理的**三级递进**。它们控制模型*何时*被 nudge 压缩，以及大输出*何时*被强制截断以维持会话存活。阈值越低，扩展压缩得越早、越激进。
@@ -527,8 +611,17 @@
 
   思考项不透明且必须原样回传的 provider（如 OpenAI 加密 reasoning）可按 provider 退出：
   ```json
-  { "compress": { "providers": { "openai": { "reasoning": { "drop": false } } } } }
-  ```
+   { "compress": { "providers": { "openai": { "reasoning": { "drop": false } } } } }
+   ```
+
+   **严格回传的思考型上游（自动禁用）。** 少数思考模式 provider 在已闭合轮次的 assistant 消息丢失 reasoning 后，会以 HTTP 400（`The \`reasoning_content\` ... must be passed back to the API`）拒绝重放请求。适配器通过静态检测识别 **DeepSeek**——模型的 `baseUrl` 或 provider 名包含 `deepseek`（不区分大小写）——并对该模型自动强制 `drop: false`，即使显式配置了 `drop: true` 也会为安全起见覆盖。对非思考的 DeepSeek 模型零成本（它们不产生可丢弃的 `thinking` 部分）。**不在** `deepseek` 主机上的严格回传 provider——GLM-thinking、QwQ、自托管 DeepSeek 镜像——刻意不做自动检测（否则会禁用其非思考模型的该 pass），请对它们使用上面的按 provider 覆盖。配套修复：代理侧 billion-context#690、内核侧折叠原子性 acp-kernel#245（随 acp-kernel 0.0.63 发布）；跟踪于 [#361](https://github.com/ranxianglei/billion-context-pi/issues/361)。
+
+### `compress.promptPack`
+
+- **类型：** `string` — 包名（`[A-Za-z0-9][A-Za-z0-9._-]*`，不含路径分隔符）
+- **默认：** `"default"`
+- **状态：** 🟢 ACTIVE
+- **描述：** 选择一个**提示词包（prompt pack）**——一组命名的表面覆盖（提示词分段、nudge 分段、工具提示词、delegate 提示词、四条压缩规则），作为 `acp.json` 内联覆盖之下的基础层生效。与其他 `compress.*` 字段走同一三级级联：`models > providers > global`，逐回合按当前模型解析。完整参考与内置 `lean` 包见[提示词包](#提示词包)。
 
 ### `compress.providers` —— 按 provider / 按 model 覆盖
 
@@ -593,12 +686,158 @@ provider 的 key 是 **Pi provider 名**(如 `"anthropic"`、`"openai"`、`"zhip
   }
   ```
 
+### `promptSections`
+
+- **类型：** `object`（部分覆盖——逐段三态）
+- **默认值：** *(内置默认)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 覆盖 ACP 系统提示词的各段。十三个键：九个结构性文档段（`acpTags`、`summariesInContext`、`tools`、`whenToCompress`、`whenNotToCompress`、`multiTierIntro`、`decompressPhilosophy`、`contextBreakdown`、`throttleRetry`）加四个规则块（`philosophy`、`howToCompress`、`tier2`、`tier3`）。三态语义：字符串**替换**该段，`null` **删除**该段，省略则保持默认。不经风险门禁——若需经门禁替换规则文本请用 `prompts`；两者同时设置时 `promptSections` 生效（后应用）。示例：
+
+  ```json
+  {
+    "promptSections": {
+      "acpTags": "(自定义 acp 标签说明)",
+      "contextBreakdown": null
+    }
+  }
+  ```
+
+### `nudgeSections`
+
+- **类型：** `object`（部分覆盖——逐键三态）
+- **默认值：** *(内置默认)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 覆盖压缩提示的**引导类文本**。四个键：`efficiencyNote`（温和提示开场）、`emergencyHeader`（紧急提示开场）、`t2Guidance`（T2 蒸馏引导）、`t3Guidance`（T3 凝缩引导）。与 `promptSections` 相同的三态语义。不经风险门禁。触发行、渲染器标签和工具反馈文本属于契约锁定，不可覆盖。示例：
+
+  ```json
+  {
+    "nudgeSections": {
+      "efficiencyNote": "保持工作集精简——尽早折叠已消耗的输出。",
+      "emergencyHeader": null
+    }
+  }
+  ```
+
+### `toolPrompts`
+
+- **类型：** `object`（逐工具部分覆盖）
+- **默认值：** *(内置默认)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 覆盖四个 ACP 工具面向 LLM 的文案。键：`compress`、`decompress`、`search_context`、`acp_status`。每项可设 `description`（字符串）、`paramDescriptions`（参数名→字符串的对象——重写 schema 字段描述）、`promptSnippet`（字符串，显示在系统提示词的“可用工具”段）、`promptGuidelines`（字符串或字符串数组——追加到系统提示词 Guidelines 段）。在**扩展加载时同步读取**（工具定义在注册时固化），修改后需重启 pi。示例：
+
+  ```json
+  {
+    "toolPrompts": {
+      "compress": {
+        "promptSnippet": "compress({ content: [{ startId, endId, summary }] })",
+        "paramDescriptions": { "summary": "简短稠密摘要；路径+决策逐字保留。" }
+      }
+    }
+  }
+  ```
+
+### `delegatePrompt`
+
+- **类型：** `string | null`
+- **默认值：** *(内置 `ACP_DELEGATE_NOTIFICATIONS` 附录)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 替换（`string`）或删除（`null`）delegate 工具启用时追加到系统提示词的 `ACP_DELEGATE_NOTIFICATIONS` 附录。适用于用自己的后台任务机制、语义不同的宿主。仅在 `delegate` 启用时生效。示例：
+
+  ```json
+  { "delegatePrompt": "后台任务结果以系统通知到达——如相关则读取结果文件。" }
+  ```
+
 ### `acknowledgePromptsRisk`
 
 - **类型：** `boolean`
 - **默认值：** `false`
 - **状态：** 🟢 ACTIVE
 - **说明：** `prompts` 覆盖的安全门禁。设为 `true` 以确认替换内核调优的压缩规则可能降低摘要质量，并使你的 `prompts` 覆盖生效。为 `false`（或省略）时，所有 `prompts` 覆盖被忽略，使用内核默认值。如果 `resolvePrompts` 拒绝了你的覆盖（例如某个仍通过类型检查的畸形值），扩展会回退到默认值并记录 `prompts-resolve-failed` 警告，而不是启动失败。
+
+---
+
+## 提示词包
+
+**提示词包（prompt pack）**是一个命名的 JSON 文件，把表面覆盖打包——提示词分段、nudge 分段、工具提示词、delegate 提示词、四条承重压缩规则——切模型整个 ACP 表面只需一行，不必把整块 `promptSections`/`toolPrompts` JSON 粘进 `acp.json`：
+
+```json
+{ "compress": { "promptPack": "lean" } }
+```
+
+包选择复用标准 `compress` 三级级联（`models > providers > global`，逐字段最深者赢），因此不同模型用不同包不需要额外配置管道：
+
+```json
+{ "compress": { "providers": { "zhipu": { "promptPack": "lean" } } } }
+```
+
+### 查找顺序
+
+包名 `N`，首个命中者生效：
+
+1. `<项目>/.pi/acp/packs/N.json` — 项目本地（最后检查但优先——可遮蔽以下两者）
+2. `~/.pi/acp/packs/N.json` — 用户全局
+3. 内置包：`default`、`lean`
+
+包名必须匹配 `[A-Za-z0-9][A-Za-z0-9._-]*`（禁止 `..` 与路径分隔符）；非法名字、不可读或非法 JSON 的文件都回退到内置包——适配器绝不因坏包崩溃。
+
+### 包文件 schema
+
+```jsonc
+{
+  "name": "my-pack",              // 信息性
+  "version": "1.0.0",             // 信息性
+  "description": "...",           // 信息性
+  "prompts": {                     // 4 条承重规则字符串（有风险门，见下）
+    "compressPhilosophy": "...",
+    "howToCompressRules": "...",
+    "tier2DistillRules": "...",
+    "tier3CondenseRules": "..."
+  },
+  "promptSections": { "acpTags": "...", "tier2": null },   // 与 acp.json promptSections 同 schema
+  "nudgeSections": { "efficiencyNote": "..." },             // 与 acp.json nudgeSections 同 schema
+  "toolPrompts": { "compress": { "description": "..." } }, // 与 acp.json toolPrompts 同 schema
+  "delegatePrompt": "..."          // string 替换，null 删除
+}
+```
+
+所有字段可选；每个字段走与其 `acp.json` 对应项相同的消毒器，每个 section 内的每个键都是三态（`string` 替换、`null` 删除、缺省保留包/内置值）。
+
+### 合并语义——包为基础层，内联优先
+
+一回合的有效表面 = **包默认值 ⊕ `acp.json` 内联覆盖**，逐字段：
+
+- `promptSections` / `nudgeSections`：内联键胜包键（含 `null`）。
+- `toolPrompts`：先按工具，再按字段（`description`、`promptSnippet`、`promptGuidelines`），再按 `paramDescriptions` 内逐参数。
+- `delegatePrompt`：内联存在则胜（含 `null`）。
+
+### 可编程来源（宿主与未来安装器）
+
+查找链本身可插拔。**包源（PackSource）**是实现以下接口的任意对象：
+
+```ts
+interface PackSource {
+  id: string;
+  resolve(name: string): Pack | null;  // 已消毒表面 + 来源标签
+  list?(): Pack[];                       // 可选，支撑列包
+}
+```
+
+内置包、目录包、任何托管注册表全部走同一个 `createPackResolver([...sources])`——首个命中者胜，**前置的 source 可遮蔽一切**。这就是为将来 `bili-pi install` 式包管理器预留的集成点：把包文件写进用户目录（零代码），或在默认链前面注册一个 managed source——两条路都不改核心。内嵌适配器的宿主也可以自建 resolver 传给 `resolveActivePack`。
+
+### 风险门
+
+包的 `prompts` 块会覆盖压缩规则字符串，与内联 `prompts` 完全一样——因此受同一个 [`acknowledgePromptsRisk`](#acknowledgepromptsrisk) 开关门控。`acp.json` 未设该标志时，包的 `prompts` 块被忽略（包内其余照常生效）并记录警告。该标志不能随包分发——它必须是显式的本地选择。
+
+### 内置包
+
+| 名称 | 用途 |
+|------|------|
+| `default` | 无覆盖——完整内置表面。 |
+| `lean` | Token 精简表面：一个紧凑系统提示词块 + 单行工具描述，无 snippet/guidelines（实测 5422→1312 字节，约省 76%）。压缩规则保持内核默认，由 nudge 按需送达。改编自社区调研 [#410](https://github.com/ranxianglei/billion-context-pi/issues/410)。 |
+
+### `lean` 细节
+
+`lean` 包把系统提示词除单个 `acpTags` 块（八条单行规则：refs、压什么、保留什么、召回工具、重编号恢复、解压到文件、节流续作、摘要是历史）外全部置空，四个工具的 `promptSnippet`/`promptGuidelines` 全部清空，`description` 换成单行。未覆盖的部分——压缩哲学、分层规则、nudge 文本——保持内置默认。适合会把工具 schema 原样抄进回答的小模型，或想把编码 token 最大化拿回来的场景。试用：`{ "compress": { "promptPack": "lean" } }`。
 
 ---
 
@@ -668,3 +907,10 @@ provider 的 key 是 **Pi provider 名**(如 `"anthropic"`、`"openai"`、`"zhip
 - **默认值：** *(未设置——上限遵循 `delegate.maxConcurrent`，再否则 unlimited)*
 - **状态：** 🟢 ACTIVE
 - **说明：** 覆盖后台（`async`）delegate 并发上限。**优先于** `delegate.maxConcurrent`。设为 `1` 强制串行执行。无效值会带警告回退到下一个来源（最终 unlimited），而不是让会话失败。
+
+### `PI_ACP_DELEGATE_FORCE_ENABLE`
+
+- **类型：** `true` | `false`
+- **默认值：** *(未设置——遵循 `delegate.forceEnable`，再否则 false)*
+- **状态：** 🟢 ACTIVE
+- **说明：** 覆盖"检测到项目级 `pi-subagents` 安装时是否仍保留 `acp_delegate`"。**优先于** `delegate.forceEnable`。无法解析的值带警告回退到配置值，而不是让会话失败。

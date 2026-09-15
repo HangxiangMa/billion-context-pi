@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveConfig, resolveCompress, mergeCompress, resolveDelegate, resolveRepetitionGuard, REPETITION_GUARD_DEFAULTS, type AdapterConfig } from "../src/config.js";
+import { resolveConfig, resolveCompress, mergeCompress, resolveDelegate, resolveRepetitionGuard, resolveHostSession, REPETITION_GUARD_DEFAULTS, type AdapterConfig } from "../src/config.js";
 
 const EMPTY: AdapterConfig = {};
 
@@ -155,6 +155,49 @@ test("resolveDelegate: maxConcurrent absent resolves to unlimited", () => {
 test("resolveDelegate: boolean shorthand leaves maxConcurrent unlimited", () => {
   const r = resolveDelegate({ delegate: true });
   assert.equal(r.maxConcurrent, Infinity);
+});
+
+test("resolveDelegate: forceEnable defaults to false", () => {
+  assert.equal(resolveDelegate({}).forceEnable, false);
+  assert.equal(resolveDelegate({ delegate: true }).forceEnable, false);
+  assert.equal(resolveDelegate({ delegate: { enabled: true } }).forceEnable, false);
+});
+
+test("resolveDelegate: forceEnable true is honored; explicit false stays off", () => {
+  assert.equal(resolveDelegate({ delegate: { forceEnable: true } }).forceEnable, true);
+  assert.equal(resolveDelegate({ delegate: { forceEnable: false } }).forceEnable, false);
+});
+
+test("resolveDelegate: PI_ACP_DELEGATE_FORCE_ENABLE overrides acp.json (env > config)", () => {
+  const prev = process.env.PI_ACP_DELEGATE_FORCE_ENABLE;
+  try {
+    process.env.PI_ACP_DELEGATE_FORCE_ENABLE = "true";
+    assert.equal(resolveDelegate({}).forceEnable, true);
+    assert.equal(resolveDelegate({ delegate: { forceEnable: false } }).forceEnable, true);
+    process.env.PI_ACP_DELEGATE_FORCE_ENABLE = "false";
+    assert.equal(resolveDelegate({ delegate: { forceEnable: true } }).forceEnable, false);
+  } finally {
+    if (prev === undefined) delete process.env.PI_ACP_DELEGATE_FORCE_ENABLE;
+    else process.env.PI_ACP_DELEGATE_FORCE_ENABLE = prev;
+  }
+});
+
+test("resolveDelegate: unparseable PI_ACP_DELEGATE_FORCE_ENABLE falls back to the config value", () => {
+  const prev = process.env.PI_ACP_DELEGATE_FORCE_ENABLE;
+  try {
+    process.env.PI_ACP_DELEGATE_FORCE_ENABLE = "maybe";
+    assert.equal(resolveDelegate({}).forceEnable, false);
+    assert.equal(resolveDelegate({ delegate: { forceEnable: true } }).forceEnable, true);
+  } finally {
+    if (prev === undefined) delete process.env.PI_ACP_DELEGATE_FORCE_ENABLE;
+    else process.env.PI_ACP_DELEGATE_FORCE_ENABLE = prev;
+  }
+});
+
+test("resolveDelegate: forceEnable never re-enables an explicitly disabled delegate (priority matrix)", () => {
+  const p = resolveDelegate({ delegate: { enabled: false, forceEnable: true } });
+  assert.equal(p.enabled, false);
+  assert.equal(p.forceEnable, true);
 });
 
 test("resolveDelegate: legacy flat displayUsage still works with boolean delegate", () => {
@@ -414,4 +457,23 @@ test("resolveRepetitionGuard keeps custom thresholds while honoring enabled:fals
   assert.equal(r.enabled, false);
   assert.equal(r.warn, 4);
   assert.equal(r.abort, 9);
+});
+
+test("resolveHostSession defaults to pi-native (off) when unset or false", () => {
+  assert.deepEqual(resolveHostSession(EMPTY), { countCustomMessages: false });
+  assert.deepEqual(resolveHostSession({ hostSession: false }), { countCustomMessages: false });
+});
+
+test("resolveHostSession boolean true shorthand enables countCustomMessages", () => {
+  assert.deepEqual(resolveHostSession({ hostSession: true }), { countCustomMessages: true });
+});
+
+test("resolveHostSession object form honors explicit values", () => {
+  assert.deepEqual(resolveHostSession({ hostSession: { countCustomMessages: true } }), { countCustomMessages: true });
+  assert.deepEqual(resolveHostSession({ hostSession: { countCustomMessages: false } }), { countCustomMessages: false });
+});
+
+test("resolveHostSession falls back to off for invalid values", () => {
+  assert.deepEqual(resolveHostSession({ hostSession: "yes" as unknown as boolean }), { countCustomMessages: false });
+  assert.deepEqual(resolveHostSession({ hostSession: { countCustomMessages: "yes" as unknown as boolean } }), { countCustomMessages: false });
 });
