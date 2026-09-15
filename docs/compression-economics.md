@@ -265,6 +265,76 @@ release.
   raises `h`; summary density changes `β`).
 - Prices change; all formulas are parameterized so re-plugging numbers is trivial.
 
+## 7. Estimator & live pricing (2026-09-15)
+
+### 7.1 Interactive estimator
+
+`estimator/index.html` — self-contained, zero-dependency page (offline-capable,
+opens in any browser). Sliders for V, S, h, β, g, Vmin, k plus a price preset for
+every model in §7.2 (or fully custom w/r/q). Live outputs: ΔC₁ (K units and $),
+Δs, n\*(S), S\*, C(S), $/100 turns, and a verdict banner comparing the configured
+cadence k against n\*. Two live charts: the break-even curve with the cadence line,
+and the steady-state cost curve with S\* and the operating point marked.
+
+### 7.2 Mainstream model pricing (fetched 2026-09-15)
+
+Source: [BerriAI/litellm](https://github.com/BerriAI/litellm)
+`model_prices_and_context_window.json`, commit `7e3ca14`. USD per M tokens;
+derived normalized params w = cacheWrite/input, r = cacheRead/input,
+q = output/input (missing cacheWrite ⇒ w = 1.0):
+
+| Model | input | output | cache read | cache write | w | r | q | max ctx |
+|-------|-------|--------|-----------|-------------|------|------|---|---------|
+| gpt-5.6 | 4.00 | 20 | 0.40 | 5.00 | 1.25 | 0.10 | 5 | 128K |
+| gpt-5.5 | 5.00 | 30 | 0.50 | – | 1.00 | 0.10 | 6 | 128K |
+| gpt-5.4 | 2.50 | 15 | 0.25 | – | 1.00 | 0.10 | 6 | 128K |
+| gpt-5.4-mini | 0.75 | 4.5 | 0.075 | – | 1.00 | 0.10 | 6 | 128K |
+| gpt-5.1 / gpt-5 | 1.25 | 10 | 0.125 | – | 1.00 | 0.10 | 8 | 128K |
+| gpt-5-mini | 0.25 | 2 | 0.025 | – | 1.00 | 0.10 | 8 | 128K |
+| o3 | 2.00 | 8 | 0.50 | – | 1.00 | 0.25 | 4 | 100K |
+| o4-mini | 1.10 | 4.4 | 0.275 | – | 1.00 | 0.25 | 4 | 100K |
+| claude-opus-4-8 | 5.00 | 25 | 0.50 | 6.25 | 1.25 | 0.10 | 5 | 128K |
+| claude-sonnet-5 | 2.00 | 10 | 0.20 | 2.50 | 1.25 | 0.10 | 5 | 128K |
+| claude-sonnet-4-6 | 3.00 | 15 | 0.30 | 3.75 | 1.25 | 0.10 | 5 | 128K |
+| claude-haiku-4-5 | 1.00 | 5 | 0.10 | 1.25 | 1.25 | 0.10 | 5 | 64K |
+| gemini-2.5-pro | 1.25 | 10 | 0.125 | – | 1.00 | 0.10 | 8 | 65K |
+| gemini-3-pro-preview | 2.00 | 12 | 0.20 | – | 1.00 | 0.10 | 6 | 65K |
+| gemini-3.5-flash | 1.50 | 9 | 0.15 | – | 1.00 | 0.10 | 6 | 65K |
+
+> **Caveat — Gemini:** litellm's Gemini cache-read values reflect Google's
+> context-caching discount; Google's caching mechanism (separate storage fees,
+> different TTL semantics) does not map 1:1 onto prefix caching, so the w/r
+> mapping for Gemini rows is approximate.
+
+**Finding.** Current-generation list prices are far more homogeneous than the
+uniform-r assumption of §1–§4 suggested: every major family now prices cache
+reads at ≈0.1× input (the 0.5× figures that circulated for OpenAI are
+GPT-4o-era), cache writes at 1.0× or 1.25×, and output ratios cluster at
+q ∈ {4, 5, 6, 8}. Under fixed geometry (V=70K, h=0.33, β=0.05, g=2.5K/turn,
+Vmin=20K):
+
+- Break-even turns n\*(S) span only ≈3.4–4.3 across all pricing classes at
+  S=50K — the fold decision is effectively **model-independent**; geometry
+  (h, g, Vmin) sets the sweet spot, and the price table only scales absolute $.
+- The interior optimum lands at S\* ≈ 21K (w=1) / 23K (w=1.25) regardless of
+  vendor — same conclusion.
+- Absolute steady-state cost at S\* scales with input price: $0.19/100 turns
+  (gpt-5-mini) → $4.15/100 turns (claude-opus-4-8).
+
+![Break-even turns by pricing class](assets/compression-economics/pricing-nstar-vs-S.png)
+
+![Absolute cost at S* per model](assets/compression-economics/pricing-absolute-cost.png)
+
+### 7.3 `/acp` economics readout (proposed, not implemented)
+
+Feasibility: high. The `acp_status` overview already appends extra sections
+(nudge state, ranges); last-fold geometry can be recomputed on demand via
+`firstFoldStartTokens()` (PR #447) from data already available in the status
+handler, so no state-schema change is needed. Proposed config surface: an
+optional `priceProfile` ({w,r,q} or a $/M triple) on the adapter config; when
+set, `/acp` would show V, last-fold h, S, n\*(S), S\*, and a cadence verdict.
+Awaiting owner sign-off before implementation.
+
 ## References
 
 - [#359](https://github.com/ranxianglei/billion-context-pi/issues/359) — byte-level

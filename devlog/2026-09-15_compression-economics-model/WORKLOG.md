@@ -36,3 +36,23 @@
 - Docs-only change; no build/test impact. Chart PNGs rendered and inspected.
 - Formula sanity: exact `ΔC₁` equals the increment over a cache-hit baseline; upper
   bound ≥ exact; `n*` monotonic in `S`; `S*` interior optimum requires `qβ > r`.
+
+## Iteration 2 — estimator + live pricing (@dog request on #359)
+
+- Added `estimator/index.html`: self-contained zero-dependency interactive
+  estimator (sliders V/S/h/β/g/Vmin/k, 17 price presets incl. custom, live
+  ΔC₁/$ Δs n* S* C(S) verdict + two canvas charts). GitHub markdown cannot run
+  JS; page is hosted in-repo for GitHub Pages / local opening.
+- Fetched current mainstream pricing from BerriAI/litellm
+  `model_prices_and_context_window.json` @ commit `7e3ca14` (2026-09-15);
+  mapped to (w,r,q) and added doc §7 with table + two new charts:
+  `pricing-nstar-vs-S.png` (break-even by pricing class) and
+  `pricing-absolute-cost.png` ($/100 turns at S*).
+- Key finding: current-gen pricing is nearly vendor-homogeneous (r≈0.1
+  everywhere; earlier "OpenAI cache-read = 0.5×" assumption was GPT-4o-era) →
+  n*(S) ≈ 3.4–4.3 at S=50K across all classes; S* set by geometry, absolute $
+  ∝ input price.
+- `/acp` economics readout: feasibility assessed (recompute last-fold geometry
+  via firstFoldStartTokens() from data already in the status handler; optional
+  priceProfile config; no state-schema change) — documented as proposed in
+  doc §7.3, implementation deferred pending owner decision.
