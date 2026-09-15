@@ -145,6 +145,21 @@ export interface AcpRuntime {
    *  renumbers refs so old fingerprints are meaningless; session_shutdown for
    *  memory hygiene). */
   clearDeadCompress(sid: string): void;
+  /** Record one turn's FRESH-anchor provider usage sample and report whether
+   *  the recent window is stable enough to calibrate the internal estimate
+   *  against it (issue #455): >=3 of the last 4 samples agree within a 25%
+   *  spread. A jittering getContextUsage() must not become a moving cap, so
+   *  unstable windows report false and the raw estimate stands. */
+  noteHostUsage(sid: string, tokens: number): boolean;
+  /** Drop a session's host-usage stability window (session_shutdown). */
+  dropHostUsageSamples(sid: string): void;
+  /** Track persistent >2x internal-vs-provider size disagreement (issue #455);
+   *  returns true exactly once per episode — on the third consecutive
+   *  divergent turn — so the caller warns once instead of every turn. A
+   *  convergent turn ends the episode. */
+  noteSizeDivergence(sid: string, divergent: boolean): boolean;
+  /** Drop a session's size-divergence episode (session_shutdown). */
+  dropSizeDivergence(sid: string): void;
 }
 // omp fires the context event before the current user message is persisted to
 // the session branch, so merge event.messages (exact messages about to be sent,
@@ -370,6 +385,49 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     tokenScaleStale.delete(sid);
   }
 
+  // [#455] Per-session window of FRESH-anchor provider usage samples. The
+  // calibration anchor caps the internal estimate at measured × headroom, but
+  // only while recent samples agree: a jittering getContextUsage() (±15K on
+  // near-identical views in the #452 log) must not become a moving cap.
+  const HOST_USAGE_WINDOW = 4;
+  const HOST_USAGE_MIN_SAMPLES = 3;
+  const HOST_USAGE_SPREAD_MAX = 0.25;
+  const hostUsageSamples = new Map<string, number[]>();
+  function noteHostUsage(sid: string, tokens: number): boolean {
+    if (tokens <= 0) return false;
+    let win = hostUsageSamples.get(sid);
+    if (!win) {
+      win = [];
+      hostUsageSamples.set(sid, win);
+    }
+    win.push(tokens);
+    if (win.length > HOST_USAGE_WINDOW) win.shift();
+    if (win.length < HOST_USAGE_MIN_SAMPLES) return false;
+    const lo = Math.min(...win);
+    const hi = Math.max(...win);
+    return (hi - lo) / lo <= HOST_USAGE_SPREAD_MAX;
+  }
+  function dropHostUsageSamples(sid: string): void {
+    hostUsageSamples.delete(sid);
+  }
+
+  // [#455] Persistent >2x internal-vs-provider disagreement, one warn per
+  // episode: fires on the third consecutive divergent turn, resets when the
+  // rulers converge or the session ends.
+  const sizeDivergenceStreaks = new Map<string, number>();
+  function noteSizeDivergence(sid: string, divergent: boolean): boolean {
+    if (!divergent) {
+      sizeDivergenceStreaks.delete(sid);
+      return false;
+    }
+    const streak = (sizeDivergenceStreaks.get(sid) ?? 0) + 1;
+    sizeDivergenceStreaks.set(sid, streak);
+    return streak === 3;
+  }
+  function dropSizeDivergence(sid: string): void {
+    sizeDivergenceStreaks.delete(sid);
+  }
+
   // [#361] session ids already logged for the strict-echo auto-disable, so the
   // info event fires once per session rather than once per LLM call.
   const strictEchoLogged = new Set<string>();
@@ -570,4 +628,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   let refused = false;
   let refusalMessage: string | null = null;
   let delegateStoodDown = false;
-  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale };}
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale, noteHostUsage, dropHostUsageSamples, noteSizeDivergence, dropSizeDivergence };}
