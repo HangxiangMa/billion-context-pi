@@ -112,11 +112,10 @@ export function attachWatchdogs(
     eofTimer = setTimeout(() => {
       if (hooks.isSettled()) return;
       hooks.onEofGrace();
-      try {
-        child.kill("SIGTERM");
-      } catch {
-        /* best-effort */
-      }
+      // Use the same termination path as idle/hard-limit watchdogs so a
+      // SIGTERM-resistant child is escalated to SIGKILL and cannot hold the
+      // delegate slot forever after stdout has closed.
+      killByWatchdog("output ended but process did not exit");
     }, opts.eofGraceMs);
     eofTimer.unref?.();
   };
