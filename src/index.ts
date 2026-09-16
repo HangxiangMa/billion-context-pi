@@ -47,7 +47,7 @@ import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
 import { applyOutputHeadroom, inspectOverflowMessage, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
 import { FORK_HOST_WARNING_MESSAGE, UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
 import { isDeclaredForkHost, isUnsupportedHost } from "./host.js";
-import { isBiliProxyBaseUrl, PROXY_STAND_DOWN_MESSAGE } from "./proxy-detect.js";
+import { isBiliProxyBaseUrl, PROXY_STAND_DOWN_MESSAGE, nativeStandDownMessage } from "./proxy-detect.js";
 import { findPiSubagentsInstalls, resolveAgentDir, DELEGATE_STAND_DOWN_MESSAGE } from "./setup-subagent-tools.js";
 
 // Host-facing API for multi-session hosts (docs/host-adapter.md, #367): the
@@ -73,24 +73,41 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
       return;
     }
     const runtime = createRuntime(adapter);
-    // Manual-wiring double-compression guard (issue #296): the launcher path
-    // exports BILLION_CONTEXT_PROXY (checked above), but a user who starts the
-    // proxy standalone (`bili start`) and points models.json baseUrl at
-    // http://127.0.0.1:PORT/bili/<scheme>://upstream... never sets the env var —
-    // without this check bcp and the proxy both compress every request. Yields
-    // exactly like the env path: stand down, let the proxy own compression.
+    // Double-compression guards (#296, #461): exactly one side may own
+    // compression. Three signals, ALL checked lazily on every event because
+    // none can be trusted at factory time:
+    //  - BILLION_CONTEXT_PROXY: exported by the `bili <client>` launchers
+    //    (inherited by the child), but never set by the standalone-proxy +
+    //    manual-wiring path below.
+    //  - /bili/ baseUrl prefix: manual wiring (#296) — `bili start` + models.json
+    //    baseUrl pointed at http://127.0.0.1:PORT/bili/<scheme>://upstream...
+    //    without the env var.
+    //  - BILLION_CONTEXT_NATIVE: set synchronously (before any await) by a
+    //    host-native entry's module evaluation (billion-context#820/#824) — the
+    //    ONLY signal visible in native mode, where the bootstrap writes
+    //    BILLION_CONTEXT_PROXY only after the proxy is up (past the synchronous
+    //    extension load) and the fetch-layer rewrite keeps the configured
+    //    baseUrl clean.
+    // The env vars are re-read on every call — an async bootstrap writes them
+    // after extensions load, so a one-shot factory read misses them (#461).
     // Checked lazily because ctx.model only exists on events, not in the
     // factory; warn once per process like the OMP refusal.
-    let proxyWarned = false;
+    let standDownWarned = false;
     const standDownIfProxied = (ctx: ExtensionContext): boolean => {
-      if (!isBiliProxyBaseUrl((ctx.model as { baseUrl?: string } | undefined)?.baseUrl)) return false;
+      const nativeHost = process.env.BILLION_CONTEXT_NATIVE || undefined;
+      if (
+        nativeHost === undefined &&
+        !process.env.BILLION_CONTEXT_PROXY &&
+        !isBiliProxyBaseUrl((ctx.model as { baseUrl?: string } | undefined)?.baseUrl)
+      ) return false;
+      const message = nativeHost !== undefined ? nativeStandDownMessage(nativeHost) : PROXY_STAND_DOWN_MESSAGE;
       runtime.refused = true;
-      runtime.refusalMessage = PROXY_STAND_DOWN_MESSAGE;
-      if (!proxyWarned) {
-        proxyWarned = true;
-        logWarn("host", { event: "proxy-baseurl-detected", sid: ctx.sessionManager.getSessionId(), action: "refused" });
-        if (ctx.hasUI) ctx.ui.notify(PROXY_STAND_DOWN_MESSAGE, "warning");
-        else console.error(PROXY_STAND_DOWN_MESSAGE);
+      runtime.refusalMessage = message;
+      if (!standDownWarned) {
+        standDownWarned = true;
+        logWarn("host", { event: nativeHost !== undefined ? "native-host-detected" : "proxy-detected", sid: ctx.sessionManager.getSessionId(), action: "refused", native: nativeHost ?? null });
+        if (ctx.hasUI) ctx.ui.notify(message, "warning");
+        else console.error(message);
       }
       return true;
     };
