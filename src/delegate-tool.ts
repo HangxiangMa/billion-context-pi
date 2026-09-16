@@ -2354,6 +2354,7 @@ interface ChildResult {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  aborted?: boolean;
 }
 
 function waitForChild(
@@ -2364,35 +2365,52 @@ function waitForChild(
   return new Promise((resolve) => {
     const stdoutChunks: Buffer[] = [];
     let stderrText = "";
+    let finished = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const onAbort = () => {
+      if (finished) return;
+      if (timer) clearTimeout(timer);
+      terminateDelegateChild(child, "SIGTERM");
+      // Do not leave synchronous tool calls waiting forever when a child
+      // ignores SIGTERM. Return an explicit aborted result, then escalate the
+      // detached process group after the same bounded grace used elsewhere.
+      killTimer = setTimeout(() => terminateDelegateChild(child, "SIGKILL"), KILL_GRACE_MS);
+      finish({ code: null, stdout: "", stderr: stderrText, timedOut: false, aborted: true }, true);
+    };
+
+    const finish = (r: ChildResult, keepKillTimer = false) => {
+      if (finished) {
+        if (killTimer) clearTimeout(killTimer);
+        return;
+      }
+      finished = true;
+      if (timer) clearTimeout(timer);
+      if (killTimer && !keepKillTimer) clearTimeout(killTimer);
+      signal?.removeEventListener("abort", onAbort);
+      resolve(r);
+    };
+
     child.stdout?.on("data", (c: Buffer) => stdoutChunks.push(c));
     child.stderr?.on("data", (c: Buffer) => {
       stderrText += c.toString("utf8");
     });
 
-    let timer: ReturnType<typeof setTimeout> | undefined;
     if (timeoutMs !== null) {
       timer = setTimeout(() => {
+        if (finished) return;
         terminateDelegateChild(child, "SIGTERM");
-        finish({ code: null, stdout: "", stderr: stderrText, timedOut: true });
+        killTimer = setTimeout(() => terminateDelegateChild(child, "SIGKILL"), KILL_GRACE_MS);
+        finish({ code: null, stdout: "", stderr: stderrText, timedOut: true }, true);
       }, timeoutMs);
     }
 
-    const onAbort = () => {
-      if (timer) clearTimeout(timer);
-      terminateDelegateChild(child, "SIGTERM");
-    };
     signal?.addEventListener("abort", onAbort, { once: true });
-
-    function finish(r: ChildResult) {
-      if (timer) clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
-      resolve(r);
-    }
-
-    child.on("close", (code, signal) => {
+    child.on("close", (code, childSignal) => {
       finish({
         code,
-        signal,
+        signal: childSignal,
         stdout: Buffer.concat(stdoutChunks).toString("utf8").trim(),
         stderr: stderrText,
         timedOut: false,
@@ -2423,12 +2441,12 @@ export function asyncWatchdogDescription(overrideAsyncMs?: number | null): strin
 }
 
 function formatSyncResult(agent: string, runId: string, task: string, r: ChildResult, file: string): string {
-  const status = r.timedOut ? "timed out" : r.code === 0 ? "completed" : "FAILED ⚠️";
+  const status = r.aborted ? "aborted" : r.timedOut ? "timed out" : r.code === 0 ? "completed" : "FAILED ⚠️";
   const header = `Delegate **${agent}** ${status} (runId \`${runId}\`, ${exitLabel(r.code, r.signal)}).`;
   if (r.code === 0 && !r.timedOut) {
     return formatPayload(header, file, task);
   }
-  const body = r.timedOut ? "(timed out)" : r.stderr.trim() || "(no stderr)";
+  const body = r.aborted ? "(aborted)" : r.timedOut ? "(timed out)" : r.stderr.trim() || "(no stderr)";
   return formatPayload(header, file, task, body);
 }
 
