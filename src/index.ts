@@ -12,7 +12,7 @@ import { join } from "node:path";
 import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
 import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges } from "acp-kernel";
 import { type AdapterConfig, resolveDelegate, resolveHostSession, DEFAULT_DELEGATE_POLICY } from "./config.js";
-import { createRuntime, retryBreakerKey, type AcpRuntime } from "./runtime.js";
+import { createRuntime, isPiHost, retryBreakerKey, type AcpRuntime } from "./runtime.js";
 import { makeCompressTool, isCompressSuccessText, isCompressNoopText } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
@@ -45,8 +45,8 @@ import {
 import { defaultCountTokens } from "acp-kernel";
 import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
 import { applyOutputHeadroom, inspectOverflowMessage, resolveOutputHeadroomCap } from "./overflow-selfheal.js";
-import { UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
-import { isUnsupportedHost } from "./host.js";
+import { FORK_HOST_WARNING_MESSAGE, UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
+import { isDeclaredForkHost, isUnsupportedHost } from "./host.js";
 import { isBiliProxyBaseUrl, PROXY_STAND_DOWN_MESSAGE } from "./proxy-detect.js";
 import { findPiSubagentsInstalls, resolveAgentDir, DELEGATE_STAND_DOWN_MESSAGE } from "./setup-subagent-tools.js";
 
@@ -172,6 +172,7 @@ function wireDelegateReadTracking(pi: ExtensionAPI): void {
 
 function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIfProxied: (ctx: ExtensionContext) => boolean): void {
   let ompWarned = false;
+  let forkWarned = false;
   let subagentStandDownWarned = false;
   pi.on("session_start", async (_event, ctx) => {
     // Unsupported hosts stand down (#234 / #364): any host without Pi's
@@ -193,6 +194,22 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
         else console.error(UNSUPPORTED_HOST_MESSAGE);
       }
       return;
+    }
+    // Declared fork hosts are admitted but carry a known limitation (#454):
+    // their in-process live-entries integration can drift the nudge's example
+    // refs from the session's real refs as the session grows, so compress
+    // calls may start failing with "does not exist in this session". Warn at
+    // admission instead of letting users discover it mid-session; root fix is
+    // tracked in #459. Log per session (support logs need the attribution),
+    // notify once per process like the refusal path above.
+    if (isDeclaredForkHost() && !isPiHost(ctx.sessionManager)) {
+      const sid = ctx.sessionManager.getSessionId();
+      logWarn("host", { event: "fork-host-admitted", sid, knownLimitation: "ref-drift", seeIssue: "#454", rootFix: "#459" });
+      if (!forkWarned) {
+        forkWarned = true;
+        if (ctx.hasUI) ctx.ui.notify(FORK_HOST_WARNING_MESSAGE, "warning");
+        else console.error(FORK_HOST_WARNING_MESSAGE);
+      }
     }
     if (standDownIfProxied(ctx)) return;
     runtime.store.invalidate();
