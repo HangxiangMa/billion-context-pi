@@ -5,11 +5,11 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
-import { MAX_COMPRESS_ATTEMPTS } from "./runtime.js";
+import { MAX_COMPRESS_ATTEMPTS, isPiHost, retryBreakerKey } from "./runtime.js";
+import { isDeclaredForkHost } from "./host.js";
 import { debug, logError, logInfo, logThrow, logWarn } from "./log.js";
 import { estimateTokens, collectCoveredMessageIds, collectImageTokens, modelSupportsImages, adjustedTokenCount } from "./tokens.js";
 import { applyToolPromptOverrides, type ToolPromptOverrides } from "./surface.js";
-import { lastTurnBoundaryId } from "./turn-boundary.js";
 import { resolveHostSession } from "./config.js";
 import { defaultCountTokens, parseCompressArgs, viableRanges, formatRanges, type CompressionBlock, type CompressionState, type CompressParseDiagnostics, type NudgeDecision } from "acp-kernel";
 import { countUnicodeEscapes, findUnverifiableUserQuote, sanitizeSummary } from "./summary-sanitize.js";
@@ -385,7 +385,10 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     }
     return s.text === r.summary ? r : { ...r, summary: s.text };
   });
-  const turnKey = lastTurnBoundaryId(entries, resolveHostSession(runtime.adapter)) ?? sid;
+  // #453: stable persisted-boundary key — must match the key the context
+  // transform records outcomes under (retryBreakerKey); a merged-view key
+  // churns under fork hosts and would never see the latched cap.
+  const turnKey = retryBreakerKey(ctx.sessionManager, resolveHostSession(runtime.adapter)) ?? sid;
   const snapshot = compressibleSnapshotText(turn.nudge);
   if (runtime.compressRetryCappedFor(sid, turnKey)) {
     logWarn("compress", { sid, event: "capped-reject", turnKey });
@@ -493,6 +496,14 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   });
   if (errors.length > 0) {
     logError("compress", { sid: ctx.sessionManager.getSessionId(), event: "errors", count: errors.length, errors: errors.slice(0, 5) });
+    // #454 stopgap: ref-resolution failures on a declared fork host carry the
+    // live-entry drift signature (see mergeLiveEntries in runtime.ts) — the
+    // same defect class OMP is refused for. Attribute it to #459 in support
+    // logs so "does not exist" spam is not misread as model misbehavior.
+    if (blocksCreated === 0 && isDeclaredForkHost() && !isPiHost(ctx.sessionManager)
+      && /does not exist|cannot be anchored|is unknown|unknown refs/i.test(errors.join(" "))) {
+      logWarn("compress", { sid: ctx.sessionManager.getSessionId(), event: "fork-ref-drift-suspected", seeIssue: "#459", errors: errors.slice(0, 3) });
+    }
   }
   if (warnings.length > 0) {
     logWarn("compress", { sid: ctx.sessionManager.getSessionId(), event: "warnings", count: warnings.length, warnings: warnings.slice(0, 5) });
