@@ -6,7 +6,9 @@ import { buildCacheReport, defaultCountTokens, formatCacheReport, type CacheSamp
 import { logThrow } from "./log.js";
 import { UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
 
-const CacheParams = Type.Object({});
+const CacheParams = Type.Object({
+  detail: Type.Optional(Type.Union([Type.Literal("summary"), Type.Literal("full")], { description: '"summary" (default): totals, verdicts, notable folds, anomalous requests only. "full": every retained fold and line item.' })),
+});
 
 const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
 
@@ -55,10 +57,10 @@ function foldEvents(state: CompressionState): FoldEvent[] {
   }));
 }
 
-export async function cacheReportText(runtime: AcpRuntime, ctx: ExtensionContext): Promise<string> {
+export async function cacheReportText(runtime: AcpRuntime, ctx: ExtensionContext, detail: "summary" | "full" = "summary"): Promise<string> {
   const { state, entries } = await runtime.stateFor(ctx);
   const report = buildCacheReport(cacheSamples(entries), foldEvents(state));
-  return formatCacheReport(report, ctx.sessionManager.getSessionId());
+  return formatCacheReport(report, ctx.sessionManager.getSessionId(), { detail });
 }
 
 export function makeCacheTool(runtime: AcpRuntime, overrides?: ToolPromptOverrides): ToolDefinition<typeof CacheParams> {
@@ -66,17 +68,17 @@ export function makeCacheTool(runtime: AcpRuntime, overrides?: ToolPromptOverrid
     name: "acp_cache",
     label: "ACP Cache Report",
     description:
-      "Prompt-cache reconciliation: grand ledger (total input/cached/output, session hit rate) with every request's miss split into new content / compression re-pay / TTL expiry, plus per-fold economics (one-time cost, breakeven turns vs measured cadence). Read-only.",
+      "Prompt-cache reconciliation: grand ledger (total input/cached/output, session hit rate) with every request's miss split into new content / compression re-pay / TTL expiry, plus per-fold economics (one-time cost, breakeven turns vs measured cadence). Defaults to a compact summary (totals + verdicts + anomalies only); pass detail=\"full\" for every fold and line item. Read-only.",
     promptSnippet: "acp_cache({})",
     promptGuidelines: [
       "Call when asked about cache hits, cache invalidation, or what compression costs.",
       "Read-only: reports numbers, never mutates context.",
     ],
     parameters: CacheParams,
-    async execute(_toolCallId, _params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
       if (runtime.refused) return { details: undefined, content: [{ type: "text", text: runtime.refusalMessage ?? UNSUPPORTED_HOST_MESSAGE }] };
       try {
-        const text = await cacheReportText(runtime, ctx);
+        const text = await cacheReportText(runtime, ctx, params.detail === "full" ? "full" : "summary");
         return { details: undefined, content: [{ type: "text", text }] };
       } catch (e) {
         logThrow("cache", e, { sid: ctx.sessionManager.getSessionId() });
