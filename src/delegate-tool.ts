@@ -366,6 +366,7 @@ const AGENT_NAMES = Object.keys(AGENTS);
 // ─── Run registry (module-level, shared across tools) ───────────────────────
 
 export type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+export type DelegateStage = "queued" | "starting" | "processing" | "finalizing" | "completed" | "failed" | "cancelled";
 
 interface DelegateRun {
   runId: string;
@@ -375,6 +376,7 @@ interface DelegateRun {
   startedAt: number;
   finishedAt?: number;
   status: RunStatus;
+  stage: DelegateStage;
   exitCode?: number | null;
   /** Exit signal when the child died by signal (exit code null), e.g. "SIGTERM". */
   exitSignal?: NodeJS.Signals;
@@ -467,6 +469,7 @@ export async function shutdownDelegates(): Promise<void> {
   for (const run of runs.values()) {
     if (run.status === "queued") {
       run.status = "cancelled";
+      run.stage = "cancelled";
       run.consumed = true;
       delegateGate.cancelQueued(run.runId);
       run.waiter?.();
@@ -474,6 +477,7 @@ export async function shutdownDelegates(): Promise<void> {
     }
     if (run.status !== "running") continue;
     run.status = "cancelled";
+    run.stage = "cancelled";
     run.consumed = true;
     if (!run.child) continue;
     running.push(run);
@@ -708,6 +712,7 @@ export interface FleetRunView {
   startedAt: number;
   finishedAt?: number;
   status: RunStatus;
+  stage: DelegateStage;
   exitLabel: string;
   timedOut?: string;
   resumedFrom?: string;
@@ -746,6 +751,7 @@ function toFleetRunView(r: DelegateRun): FleetRunView {
     startedAt: r.startedAt,
     finishedAt: r.finishedAt,
     status: r.status,
+    stage: r.stage,
     exitLabel: exitLabel(r.exitCode ?? null, r.exitSignal),
     timedOut: r.timedOut,
     resumedFrom: r.resumedFrom,
@@ -1595,6 +1601,7 @@ export function cancelDelegateRun(runId: string): boolean {
   if (!run || (run.status !== "running" && run.status !== "queued")) return false;
   const wasQueued = run.status === "queued";
   run.status = "cancelled";
+  run.stage = "cancelled";
   run.consumed = true; // suppress injection; the waiter (if any) gets cancelled status
   if (wasQueued) {
     // No child exists yet, so nothing will fire finalize to free the gate slot or
@@ -1858,6 +1865,7 @@ async function runDelegate(
       cwd,
       startedAt: Date.now(),
       status: "queued",
+      stage: "queued",
       resumedFrom: args.resumeFrom,
       model: resolvedModel,
     };
@@ -1871,6 +1879,7 @@ async function runDelegate(
     const launch = (): void => {
       if (run.status === "cancelled") return;
       run.status = "running";
+      run.stage = "starting";
       run.startedAt = Date.now();
       run.activityFile = useJsonStream ? activityFile : undefined;
       const child = spawnDelegateChild({
@@ -1941,10 +1950,14 @@ async function runDelegate(
           },
           onActivity: (line) => {
             const compact = line.replace(/\s+/g, " ").trim();
-            if (compact) run.activity = compact.length <= 120 ? compact : `${compact.slice(0, 119)}…`;
+            if (compact) {
+              run.stage = "processing";
+              run.activity = compact.length <= 120 ? compact : `${compact.slice(0, 119)}…`;
+            }
           },
           onSettled: () => {
             run.agentSettled = true;
+            run.stage = "finalizing";
             watchdog.settledGrace(SETTLED_GRACE_MS, KILL_GRACE_MS, "agent settled but process did not exit");
           },
         },
@@ -2061,6 +2074,7 @@ async function runDelegate(
             // see "finished but result missing".
             run.result = { code, file, body };
             run.status = effectiveCode === 0 ? "completed" : "failed";
+            run.stage = run.status;
             run.finishedAt = Date.now();
             // If a wait is parked on this run, wake it — it owns the result now
             // (and marks consumed so we don't double-deliver by injecting).
@@ -2168,6 +2182,7 @@ async function runDelegate(
             delegateStatusWidget.poke();
           } catch (err) {
             run.status = "failed";
+            run.stage = "failed";
             run.finishedAt = Date.now();
             run.result = run.result ?? {
               code,
@@ -2208,6 +2223,7 @@ async function runDelegate(
         // The settled guard in close (if it does fire) prevents double-finalize.
         if (run.status === "running" || run.status === "queued" || run.status === "cancelled") {
           run.status = run.status === "cancelled" ? "cancelled" : "failed";
+          run.stage = run.status;
           run.finishedAt = Date.now();
           run.result = { code: null, file: replyFile, body };
           debug.event("delegate-spawn-error", { runId, error: String(err) });
