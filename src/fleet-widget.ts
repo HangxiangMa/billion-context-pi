@@ -36,7 +36,7 @@ function emitBridge(): void {
   if (!pi?.events || !fleetSnapshot) return;
   try {
     const runs = fleetSnapshot().map((r) => ({
-      id: r.runId, agent: r.agent, task: r.task, status: r.status,
+      id: r.runId, agent: r.agent, task: r.task, status: r.status, stage: r.stage,
       startedAt: r.startedAt, finishedAt: r.finishedAt, model: r.model,
       summary: r.summary, activity: r.activity,
       transcriptFile: r.transcriptFile ?? r.sessionFile,
