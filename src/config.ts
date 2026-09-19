@@ -34,11 +34,9 @@ export interface DelegateConfig {
    *  section. Default: true. Set `enabled: false` to skip registering them. */
   enabled?: boolean;
   /** Keep acp_delegate active even when a third-party subagent extension
-   *  (pi-subagents) is installed. Default: false — when pi-subagents is
-   *  detected at session start, acp_delegate stands down (tools, fleet
-   *  shortcut and system-prompt section skipped) to avoid two overlapping
-   *  sub-agent systems, and a reminder points at /acp-subagents so the
-   *  third-party agents can still get ACP compression tools (#415). */
+   *  (pi-subagents) is installed. Default: true — acp_delegate is the stable
+   *  ACP path and must not silently disappear because another extension is
+   *  installed. Set false to opt into the old stand-down behavior (#415). */
   forceEnable?: boolean;
   /** How delegate usage is reported back to the main session.
    *  "separate" (default) — delegate tokens tracked in a separate accumulator;
@@ -101,7 +99,7 @@ export interface DelegateConfig {
  *  corresponding timeout/watchdog is disabled. */
 export interface DelegatePolicy {
   enabled: boolean;
-  /** Resolved delegate.forceEnable (default false): keep acp_delegate even
+  /** Resolved delegate.forceEnable (default true): keep acp_delegate even
    *  when a third-party subagent extension (pi-subagents) is installed (#415). */
   forceEnable: boolean;
   displayUsage: "merged" | "separate";
@@ -124,7 +122,7 @@ export interface DelegatePolicy {
 
 export const DEFAULT_DELEGATE_POLICY: DelegatePolicy = {
   enabled: true,
-  forceEnable: false,
+  forceEnable: true,
   displayUsage: "separate",
   maxDepth: 2,
   syncTimeoutMs: 5 * 60_000,
@@ -389,9 +387,9 @@ function resolveForceEnable(envValue: string | undefined, cfgValue: boolean | un
   if (envValue === "true") return true;
   if (envValue === "false") return false;
   if (envValue !== undefined) {
-    logWarn("config", { event: "delegate-config-invalid", field: "forceEnable", value: envValue, fallback: cfgValue === true });
+    logWarn("config", { event: "delegate-config-invalid", field: "forceEnable", value: envValue, fallback: cfgValue ?? DEFAULT_DELEGATE_POLICY.forceEnable });
   }
-  return cfgValue === true;
+  return cfgValue ?? DEFAULT_DELEGATE_POLICY.forceEnable;
 }
 
 function resolveMaxDepth(value: number | string | undefined): number {
