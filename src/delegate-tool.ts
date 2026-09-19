@@ -1899,8 +1899,10 @@ async function runDelegate(
           if (!s || s.destroyed || s.closed) return resolve();
           s.end(() => resolve());
         });
+      const MAX_JSONL_FRAME_BYTES = 1024 * 1024;
       let stdoutBuf = "";
       let stderrText = "";
+      let streamOverflow = false;
       const applier = makeEventApplier(
         {
           showThinking: args.showThinking === true,
@@ -1921,12 +1923,27 @@ async function runDelegate(
       child.stdout?.on("data", (c: Buffer) => {
         watchdog.poke();
         if (useJsonStream) {
+          if (streamOverflow) return;
           stdoutBuf += c.toString("utf8");
+          if (Buffer.byteLength(stdoutBuf, "utf8") > MAX_JSONL_FRAME_BYTES) {
+            streamOverflow = true;
+            stdoutBuf = "";
+            stderrText = `protocol error: JSONL frame exceeded ${MAX_JSONL_FRAME_BYTES} bytes`;
+            child.kill("SIGTERM");
+            return;
+          }
           let nl: number;
           while ((nl = stdoutBuf.indexOf("\n")) >= 0) {
             const line = stdoutBuf.slice(0, nl);
             stdoutBuf = stdoutBuf.slice(nl + 1);
             applier.handleEventLine(line);
+          }
+          if (Buffer.byteLength(stdoutBuf, "utf8") > MAX_JSONL_FRAME_BYTES) {
+            streamOverflow = true;
+            stdoutBuf = "";
+            stderrText = `protocol error: JSONL frame exceeded ${MAX_JSONL_FRAME_BYTES} bytes`;
+            child.kill("SIGTERM");
+            return;
           }
         } else {
           // omp fallback: `-p` prints the plain reply, so stdout IS the reply —
@@ -1937,7 +1954,7 @@ async function runDelegate(
         }
       });
       child.stderr?.on("data", (c: Buffer) => {
-        stderrText += c.toString("utf8");
+        if (!streamOverflow) stderrText += c.toString("utf8");
       });
 
       const finalize = (code: number | null, signal?: NodeJS.Signals | null): void => {
