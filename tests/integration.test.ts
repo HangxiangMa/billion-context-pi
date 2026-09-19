@@ -1006,7 +1006,7 @@ test("#415: project-scope pi-subagents → acp_delegate stands down (tools, shor
       const { api, handlers } = captureApi();
       const shortcuts: string[] = [];
       (api as any).registerShortcut = (key: string) => { shortcuts.push(key); };
-      createAcpExtension()(api as any);
+      createAcpExtension({ delegate: { forceEnable: false } })(api as any);
 
       const notified: string[] = [];
       const ctx = piSessionCtx(fx.tmp, fx.cwd, {

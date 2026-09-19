@@ -136,7 +136,7 @@
 | 键 | 类型 | 默认值 | 状态 | 说明 |
 |----|------|--------|------|------|
 | `delegate.enabled` | boolean | `true` | 🟢 ACTIVE | 启用 `acp_delegate` 工具及其系统提示部分。 |
-| `delegate.forceEnable` | boolean | `false` | 🟢 ACTIVE | 检测到**项目级** `pi-subagents` 安装时仍保留 `acp_delegate`（默认：自动停用；仅用户级安装只记警告日志）。可被 `PI_ACP_DELEGATE_FORCE_ENABLE` 覆盖。 |
+| `delegate.forceEnable` | boolean | `true` | 🟢 ACTIVE | 检测到**项目级** `pi-subagents` 安装时仍保留 `acp_delegate`。设为 `false` 可恢复旧的自动停用行为；仅用户级安装只记警告日志。可被 `PI_ACP_DELEGATE_FORCE_ENABLE` 覆盖。 |
 | `delegate.displayUsage` | string | `"separate"` | 🟢 ACTIVE | 控制 delegate 子代理的 token 用量如何报回主会话。 |
 | `delegate.maxDepth` | number | `2` | 🟢 ACTIVE | `acp_delegate` 最大嵌套深度（主会话 = 深度 0；处于该深度的会话成为叶子，不能再委派）。设为 `1` 可禁止 delegate 再嵌套。 |
 | `delegate.syncTimeoutMinutes` | number | `5` | 🟢 ACTIVE | **同步** `acp_delegate` 调用的硬超时（分钟）。`0` / `null` 禁用。 |
@@ -276,9 +276,9 @@
 ### `delegate.forceEnable`
 
 - **类型：** `boolean`
-- **默认值：** `false`
+- **默认值：** `true`
 - **状态：** 🟢 ACTIVE
-- **说明：** 检测到第三方 [`pi-subagents`](https://github.com/nicobailon/pi-subagents) 扩展的**项目级**安装（`<cwd>/.pi/npm/node_modules/pi-subagents` 或 `<cwd>/.pi/extensions/`）时仍保留 `acp_delegate`。默认（`false`）下，会话启动检测到项目级安装会自动停用 `acp_delegate`——两个扩展各带一套重叠的子代理系统（各自的 fleet 检查器、spawn 路径，以及 #412 背后的 inspector 快捷键冲突），两套 fleet 并存会让模型困惑。**仅用户级**（全局，`~/.pi/npm`、用户 extensions 目录）安装不会停用 `acp_delegate`，只记一条警告日志——避免一次全局安装让所有项目都失去 acp_delegate。停用时会打印醒目提醒：说明 pi-subagents 的子代理默认拿不到 ACP 上下文压缩，运行 `/acp-subagents` 可把 compress / decompress / search_context / acp_status 注入其 agent overrides。优先级：显式 `delegate.enabled: false` 永远赢过 `forceEnable`；env `PI_ACP_DELEGATE_FORCE_ENABLE` 覆盖本键。
+- **说明：** 检测到第三方 [`pi-subagents`](https://github.com/nicobailon/pi-subagents) 扩展的**项目级**安装（`<cwd>/.pi/npm/node_modules/pi-subagents` 或 `<cwd>/.pi/extensions/`）时仍保留 `acp_delegate`。设为 `false` 可恢复旧的自动停用行为。**仅用户级**（全局，`~/.pi/npm`、用户 extensions 目录）安装不会停用 `acp_delegate`，只记一条警告日志。env `PI_ACP_DELEGATE_FORCE_ENABLE` 覆盖本键。
 - **生效时机：** 与 `delegate.enabled` 相同——工具与快捷键在会话启动时注册，改动在**下一个会话**生效；系统提示段每回合实时解析，可能在工具之前先于会话内消失。
 
 ### `delegate.displayUsage`
