@@ -979,6 +979,12 @@ const WaitParams = Type.Object({
   ),
 });
 
+const StatusParams = Type.Object({
+  runId: Type.String({
+    description: "The runId returned by acp_delegate to inspect without waiting.",
+  }),
+});
+
 /** Extract non-negative cost values from a Usage.cost object. Returns undefined
  *  if all cost fields are 0 or negative. */
 function safeCost(u: Usage): Usage["cost"] | undefined {
@@ -1570,10 +1576,10 @@ export function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof W
     name: "acp_delegate_wait",
     label: "ACP Delegate Wait",
     description:
-      "Block until an acp_delegate async run finishes, then return its result (status + file path). This is the ONLY way to fetch a delegate's result — there is no non-blocking status tool, so you cannot poll. Default timeout is 10s (max 300s). If the delegate finishes within the timeout, its result is returned here (same format as a sync delegate). If it times out, the run keeps going in the background and you should STOP waiting — do not retry in a loop; go do other work, and a completion notification will still be injected into the chat when it finishes.",
+      "Block until an acp_delegate async run finishes, then return its result (status + file path). Use acp_delegate_status for non-blocking progress. Default timeout is 10s (max 300s). If it times out, the run keeps going in the background; go do other work and let the completion notification reach you.",
     promptSnippet: 'acp_delegate_wait({ runId: "del_..." })',
     promptGuidelines: [
-      "Use this to fetch a delegate's result instead of polling a status tool.",
+      "Use acp_delegate_status for a non-blocking progress snapshot; use this tool only to fetch the final result.",
       "If it times out, do NOT retry — go do other work and let the background notification reach you.",
     ],
     parameters: WaitParams,
@@ -1654,6 +1660,30 @@ export async function guideDelegate(
     ctx,
     undefined,
   );
+}
+
+export function makeDelegateStatusTool(_pi: ExtensionAPI): ToolDefinition<typeof StatusParams> {
+  return {
+    name: "acp_delegate_status",
+    label: "ACP Delegate Status",
+    description: "Inspect an acp_delegate run without blocking; returns status, elapsed time, and latest activity. Use this while a wait call would make the session look idle.",
+    parameters: StatusParams,
+    async execute(_toolCallId, params): Promise<AgentToolResult<unknown>> {
+      const run = runs.get(params.runId);
+      if (!run) return { details: undefined, content: [{ type: "text", text: `No delegate run with runId \`${params.runId}\`.` }] };
+      const now = run.finishedAt ?? Date.now();
+      const start = run.startedAt;
+      const elapsed = Math.max(0, now - start);
+      const lines = [
+        `Delegate \`${run.runId}\` is ${run.status}; elapsed ${Math.round(elapsed / 1000)}s.`,
+        `Task: ${truncate(run.task, 160)}`,
+      ];
+      if (run.activity) lines.push(`Latest activity: ${run.activity}`);
+      if (run.activityFile) lines.push(`Activity log: \`${run.activityFile}\``);
+      if (run.result?.file) lines.push(`Result: \`${run.result.file}\``);
+      return { details: undefined, content: [{ type: "text", text: lines.join("\n") }] };
+    },
+  };
 }
 
 export function makeDelegateCancelTool(_pi: ExtensionAPI): ToolDefinition<typeof CancelParams> {
