@@ -644,6 +644,12 @@ const WaitParams = Type.Object({
   ),
 });
 
+const StatusParams = Type.Object({
+  runId: Type.String({
+    description: "The runId returned by acp_delegate to inspect without waiting.",
+  }),
+});
+
 /** Extract non-negative cost values from a Usage.cost object. Returns undefined
  *  if all cost fields are 0 or negative. */
 function safeCost(u: Usage): Usage["cost"] | undefined {
@@ -1125,15 +1131,112 @@ export function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof W
     name: "acp_delegate_wait",
     label: "ACP Delegate Wait",
     description:
-      "Block until an acp_delegate async run finishes, then return its result (status + file path). This is the ONLY way to fetch a delegate's result — there is no non-blocking status tool, so you cannot poll. Default timeout is 10s (max 300s). If the delegate finishes within the timeout, its result is returned here (same format as a sync delegate). If it times out, the run keeps going in the background and you should STOP waiting — do not retry in a loop; go do other work, and a completion notification will still be injected into the chat when it finishes.",
+      "Block until an acp_delegate async run finishes, then return its result (status + file path). Use acp_delegate_status for non-blocking progress. Default timeout is 10s (max 300s). If it times out, the run keeps going in the background; go do other work and let the completion notification reach you.",
     promptSnippet: 'acp_delegate_wait({ runId: "del_..." })',
     promptGuidelines: [
-      "Use this to fetch a delegate's result instead of polling a status tool.",
+      "Use acp_delegate_status for a non-blocking progress snapshot; use this tool only to fetch the final result.",
       "If it times out, do NOT retry — go do other work and let the background notification reach you.",
     ],
     parameters: WaitParams,
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
       return withUndeliveredNotice(await exec(params as { runId: string; timeout?: number }, signal));
+    },
+  };
+}
+
+/** Cancel a live or queued run. Returns false when run is unknown or already terminal. */
+export function cancelDelegateRun(runId: string): boolean {
+  const run = runs.get(runId);
+  if (!run || (run.status !== "running" && run.status !== "queued")) return false;
+  const wasQueued = run.status === "queued";
+  run.status = "cancelled";
+  run.consumed = true; // suppress injection; the waiter (if any) gets cancelled status
+  if (wasQueued) {
+    // No child exists yet, so nothing will fire finalize to free the gate slot or
+    // wake a parked waiter — do both explicitly here.
+    delegateGate.cancelQueued(runId);
+    run.waiter?.();
+  } else {
+    try {
+      if (run.child) terminateDelegateChild(run.child, "SIGTERM");
+    } catch (err) {
+      debug.event("delegate-cancel-kill-error", {
+        runId,
+        error: String(err),
+      });
+      logError("delegate", {
+        event: "cancel-kill-error",
+        runId,
+        error: String(err),
+      });
+    }
+  }
+  delegateStatusWidget.poke();
+  return true;
+}
+
+/** Cancel a run, then start a resumed run with extra direction. This is the
+ * inspector's "interrupt + guide" action: a one-shot child cannot accept a
+ * second stdin prompt, so guidance is applied to the next restored turn. */
+export async function guideDelegate(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  runId: string,
+  guidance: string,
+): Promise<string> {
+  const run = runs.get(runId);
+  if (!run) return `Unknown runId "${runId}".`;
+  const text = guidance.trim();
+  if (!text) return "Guidance must be non-empty.";
+  if (run.status === "running" || run.status === "queued") {
+    cancelDelegateRun(runId);
+    // Wait for finalize to finish writing the session/result before copying it
+    // into the resumed run. This also avoids two children sharing one session.
+    const deadline = Date.now() + 15_000;
+    while ((run.status as RunStatus) === "cancelled" && !run.result && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  const sessionFile = join(OUT_DIR, `${runId}${SESSION_EXT}`);
+  const canResume = existsSync(sessionFile);
+  const task = canResume
+    ? text
+    : `${run.task}\n\nAdditional guidance for this attempt:\n${text}`;
+  return runDelegate(
+    pi,
+    {
+      agent: run.agent,
+      task,
+      resumeFrom: canResume ? runId : undefined,
+      cwd: run.cwd,
+      model: run.model,
+      async: true,
+    },
+    ctx,
+    undefined,
+  );
+}
+
+export function makeDelegateStatusTool(_pi: ExtensionAPI): ToolDefinition<typeof StatusParams> {
+  return {
+    name: "acp_delegate_status",
+    label: "ACP Delegate Status",
+    description: "Inspect an acp_delegate run without blocking; returns status, elapsed time, and latest activity. Use this while a wait call would make the session look idle.",
+    parameters: StatusParams,
+    async execute(_toolCallId, params): Promise<AgentToolResult<unknown>> {
+      const run = runs.get(params.runId);
+      if (!run) return { details: undefined, content: [{ type: "text", text: `No delegate run with runId \`${params.runId}\`.` }] };
+      const now = run.finishedAt ?? Date.now();
+      const start = run.startedAt;
+      const elapsed = Math.max(0, now - start);
+      const lines = [
+        `Delegate \`${run.runId}\` is ${run.status}; elapsed ${Math.round(elapsed / 1000)}s.`,
+        `Task: ${truncate(run.task, 160)}`,
+      ];
+      if (run.activity) lines.push(`Latest activity: ${run.activity}`);
+      if (run.activityFile) lines.push(`Activity log: \`${run.activityFile}\``);
+      if (run.result?.file) lines.push(`Result: \`${run.result.file}\``);
+      return { details: undefined, content: [{ type: "text", text: lines.join("\n") }] };
     },
   };
 }
