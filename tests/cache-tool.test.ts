@@ -72,7 +72,7 @@ test("acp_cache reports grand ledger with closed identity (no folds)", async () 
   assert.match(text, /^ACP CACHE REPORT \(test-session\) — 2 requests/m, "header with request count");
   assert.match(text, /GRAND LEDGER/, "grand ledger section");
   assert.match(text, /total input    8800 tok/, "sum of billed prompt totals (writes count as fresh)");
-  assert.match(text, /total cached   4300 tok  \(hit 48\.9%\)/, "session hit rate");
+  assert.match(text, /total cached   4300 tok  \(hit 48\.9% → INVESTIGATE\)/, "session hit rate + verdict");
   assert.match(text, /identity check\s+OK/, "identity closes");
   assert.doesNotMatch(text, /FOLD ECONOMICS/, "no folds → no economics section");
   // First request: everything is new content. Second: 100-tok miss with no
@@ -122,10 +122,18 @@ test("acp_cache attributes post-fold re-pay to the fold and prices it", async ()
   assert.ok(foldLine, "fold #1 line present");
   assert.match(foldLine, /T=1200/, "measured re-pay charged to the fold");
   assert.match(foldLine, /n\*=[\d.]+ k=— → \?/, "last fold: breakeven computed, cadence unobserved");
-  assert.match(text, /verdict: 0 paid back, 0 not paid back, 1 unobserved/, "unobserved tally");
+  assert.match(text, /verdict: 0 PAID BACK \/ 0 NOT PAID BACK \/ 1 unobserved/, "unobserved tally");
   const itemLines = itemRows(text);
-  assert.equal(itemLines.length, 3, "line items for all requests");
-  assert.match(itemLines[2], /1200\s+0\s+0\.0%\s+0\s+1200\s+0\s+#1$/, "post-fold miss fully attributed to the fold");
+  // Summary mode lists anomalies + the latest request: req1 (hit 0%) and the
+  // post-fold request (hit 0%, also latest). The 97.7% request is omitted.
+  assert.equal(itemLines.length, 2, "anomalous lines only in summary mode");
+  assert.match(itemLines[1], /1200\s+0\s+0\.0%\s+0\s+1200\s+0\s+#1$/, "post-fold miss fully attributed to the fold");
+  assert.match(text, /1 lines omitted/, "healthy line counted as omitted");
+
+  const resFull = await api.tools.find((t: any) => t.name === "acp_cache")!.execute("tc2f", { detail: "full" }, undefined, undefined, ctx);
+  const fullText = (resFull.content[0] as any).text as string;
+  assert.equal(itemRows(fullText).length, 3, "detail:full lists every request");
+  assert.match(fullText, /verdict: 0 paid back, 0 not paid back, 1 unobserved/, "full keeps legacy fold table wording");
 });
 
 test("/acp-cache command renders the same report via ui.notify fallback", async () => {
@@ -144,4 +152,9 @@ test("/acp-cache command renders the same report via ui.notify fallback", async 
   assert.equal(notifies.length, 1, "report delivered through notify fallback");
   assert.match(notifies[0], /^ACP CACHE REPORT \(test-session\) — 1 requests/, "same report text");
   assert.match(notifies[0], /identity check\s+OK/, "identity closes in command output");
+
+  await handler.handler("full", ctx);
+  assert.equal(notifies.length, 2, "second invocation delivered");
+  assert.ok(!/\[summary/.test(notifies[1]), "args 'full' opts out of the summary header");
+  assert.match(notifies[1], /^ACP CACHE REPORT \(test-session\) — 1 requests$/m, "full report header without summary marker");
 });

@@ -65,11 +65,12 @@ export function makeCommands(runtime: AcpRuntime, pi?: ExtensionAPI): Array<{ na
       name: "acp-cache",
       options: {
         description:
-          "Prompt-cache reconciliation: grand ledger (input/cached/hit rate) with every request's miss split into new content / compression re-pay / TTL expiry, plus per-fold economics.",
-        handler: async (_args, ctx) => {
+          "Prompt-cache reconciliation: grand ledger (input/cached/hit rate) with every request's miss split into new content / compression re-pay / TTL expiry, plus per-fold economics. Append 'full' for the every-line listing.",
+        handler: async (args, ctx) => {
           let text: string;
           try {
-            text = await cacheReportText(runtime, ctx);
+            const detail = /(^|\s)(--)?full(\s|$)/.test(args ?? "") ? "full" : "summary";
+            text = await cacheReportText(runtime, ctx, detail);
           } catch (e) {
             ctx.ui.notify(e instanceof Error ? e.message : String(e), "error");
             return;
