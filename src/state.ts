@@ -5,6 +5,7 @@ import { logError, logInfo, logWarn } from "./log.js";
 import { SIDECAR_SCHEMA_VERSION, sidecarProducer } from "./contract.js";
 
 const STATE_SUFFIX = ".acp.json";
+
 export interface LiveRefOrigin {
   rawId: string;
   identity: string;
@@ -135,13 +136,12 @@ export class SessionStateStore {
     });
     const tmp = path.join(dir, `.acp-tmp-${path.basename(file)}`);
     try {
-      // #368 contract: schemaVersion + producer head the sidecar; missing = v1
-      // (pre-contract files). Downstream readers skip unknown newer versions.
+      // #368 contract headers last: state fields can never clobber them.
       const payload: Record<string, unknown> = {
-        schemaVersion: SIDECAR_SCHEMA_VERSION,
-        producer: sidecarProducer(),
         ...state,
         liveRefOrigins,
+        schemaVersion: SIDECAR_SCHEMA_VERSION,
+        producer: sidecarProducer(),
       };
       if (derivedFrom) payload.derivedFrom = derivedFrom;
       if (activePack) payload.activePack = activePack;

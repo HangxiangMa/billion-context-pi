@@ -257,6 +257,16 @@ billion-context-pi 把每个会话的压缩状态持久化在会话转录文件�
 
 `.acp.json` 旁挂文件承载了你的压缩块。没有它,会话就会以完整原始历史运行,直到 ACP 再次压缩。
 
+### 旁挂文件契约(下游工具)
+
+直接读取 `<sessionFile>.acp.json` 的工具(跨会话检索、记忆层等)依赖以下契约:
+
+- 文件顶层携带 `schemaVersion` 与 `producer`。**缺失 `schemaVersion` 即视为 v1**(契约引入前的旧文件)。遇到未知的*更高*版本意味着字段可能已变化——跳过该文件、记一次日志、绝不改写它。
+- `blocks[]` 条目符合导出的 `BcpBlockV1` 类型(kernel `CompressionBlock` 原样存储);未知的额外字段是增量式的,读取方必须忽略。
+- 文件始终以**原子方式**替换(临时文件 + rename),并发读取方看到的要么是前一个完整文件、要么是后一个完整文件,绝不会读到半截写入。
+
+TypeScript 中通过 `import type { BcpBlockV1 } from "billion-context-pi/contract"` 导入契约;离线校验用的 JSON Schema 以 `billion-context-pi/contract/schema` 子路径发布。无需任何运行时依赖——文件本身仍是唯一事实来源。
+
 ### 迁移会话(跨机器拷贝 / 备份恢复)
 
 Pi 内置的导出/导入只搬运**转录**,不搬 ACP 状态。会丢失两样东西:

@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile, rm } from "node:fs/promises";
-import { SIDECAR_SCHEMA_VERSION, sidecarProducer, type BcpSidecarV1 } from "../src/contract.js";
+import { SIDECAR_SCHEMA_VERSION, sidecarProducer, type BcpBlockV1, type BcpSidecarV1 } from "../src/contract.js";
+import type { CompressionBlock } from "acp-kernel";
 import { createAcpExtension } from "../src/index.js";
 
 // issue #368: downstream tools glob <sessionFile>.acp.json directly. The
@@ -45,6 +46,14 @@ test("saved sidecar carries schemaVersion/producer and BcpBlockV1-shaped blocks"
 
 test("sidecarProducer identifies the writer", () => {
   assert.match(sidecarProducer(), /^billion-context-pi@/);
+});
+
+// #368: blocks persist verbatim as kernel CompressionBlock. The exported
+// BcpBlockV1 is an inlined mirror, so this compile-time assertion fails typecheck
+// if the kernel drops/renames a field the mirror requires but no longer provides.
+test("kernel CompressionBlock still covers the exported BcpBlockV1 shape", () => {
+  const cover: [CompressionBlock] extends [BcpBlockV1] ? true : never = true;
+  assert.equal(cover, true);
 });
 
 function captureApi() {

@@ -1,5 +1,3 @@
-import type { CompressionBlock } from "acp-kernel";
-
 /**
  * Machine-readable contract for the `<sessionFile>.acp.json` sidecar (#368).
  *
@@ -17,8 +15,33 @@ import type { CompressionBlock } from "acp-kernel";
  */
 export const SIDECAR_SCHEMA_VERSION = 1;
 
-/** One compressed block, as persisted in the sidecar's `blocks[]`. */
-export type BcpBlockV1 = CompressionBlock;
+/**
+ * One compressed block, as persisted in the sidecar's `blocks[]`. Mirrors the
+ * kernel's CompressionBlock (acp-kernel 0.0.81) — inlined rather than aliased
+ * so this subpath carries no type dependency on acp-kernel (dev-only, bundled
+ * at build time). Fields the kernel adds later are additive; tests assert the
+ * kernel shape still covers this one.
+ */
+export interface BcpBlockV1 {
+  blockId: string;
+  runId: string;
+  tier: 1 | 2 | 3;
+  topic?: string;
+  summary: string;
+  directMessageIds: string[];
+  effectiveMessageIds: string[];
+  directBlockIds: string[];
+  compressedTokens: number;
+  createdAt: number;
+  survivedCount: number;
+  generation: "young" | "old";
+  active: boolean;
+  expanded?: boolean;
+  durationMs?: number;
+  compressCallId?: string;
+  startRef?: string;
+  endRef?: string;
+}
 
 /** Top-level shape of the sidecar (state fields beyond the contract allowed). */
 export interface BcpSidecarV1 {
