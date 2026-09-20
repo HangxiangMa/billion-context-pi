@@ -5,6 +5,7 @@ import type {
   SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME } from "./config-dir.js";
+import { parseAcpJson } from "./user-config.js";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -142,18 +143,46 @@ export default createAcpExtension();
 // no tools, no system prompt, no context transform, and no compaction-cancel,
 // leaving Pi's native context management in control (issue #250: models too
 // small to handle ACP). Project acp.json overrides global; only a literal
-// enabled:true/false counts; missing/bad files mean "not disabled".
+// enabled:true/false counts; missing files mean "not disabled", while bad
+// files are repaired when possible and otherwise warned about loudly (#467).
 function userConfigDisabled(cwd: string): boolean {
   let disabled: boolean | undefined;
   for (const base of [join(homedir(), CONFIG_DIR_NAME), join(cwd, CONFIG_DIR_NAME)]) {
+    const file = join(base, "acp.json");
+    let text: string;
     try {
-      const parsed: unknown = JSON.parse(readFileSync(join(base, "acp.json"), "utf8"));
-      if (parsed && typeof parsed === "object") {
-        const v = (parsed as Record<string, unknown>).enabled;
-        if (v === true || v === false) disabled = v;
-      }
+      text = readFileSync(file, "utf8");
     } catch {
-      // missing file / bad JSON → not disabled
+      continue; // missing file → nothing to say
+    }
+    // #467: hand-edited configs commonly carry BOM heads, unquoted keys, or
+    // trailing commas (Windows notepad defaults). Strict JSON.parse made every
+    // one of those silently mean "not disabled" — the exact opposite of the
+    // user's intent. Repair the common shapes, then warn loudly on whatever
+    // still fails instead of swallowing it.
+    const stripped = text.replace(/^\uFEFF/, "");
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(stripped);
+    } catch {
+      try {
+        parsed = JSON.parse(
+          stripped
+            .replace(/,(?=\s*[}\]])/g, "")
+            .replace(/([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)/g, '$1"$2"$3'),
+        );
+        console.warn(`[bcp] ${file}: repaired non-strict JSON (unquoted keys / trailing commas / BOM) — prefer strict JSON so future config stays portable.`);
+      } catch (e) {
+        console.warn(`[bcp] ${file}: failed to parse (${(e as Error).message}) — treating enabled as NOT set. Fix the file; ACP stays enabled.`);
+        continue;
+      }
+    }
+    if (parsed && typeof parsed === "object") {
+      const v = (parsed as Record<string, unknown>).enabled;
+      if (v === true || v === false) disabled = v;
+      else if (v !== undefined) {
+        console.warn(`[bcp] ${file}: enabled must be the literal boolean true/false, got ${JSON.stringify(v)} — ignoring. ACP stays enabled.`);
+      }
     }
   }
   return disabled === false;
