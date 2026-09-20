@@ -24,6 +24,7 @@ import { mergeSurface, readToolSurfaceWithPacks, resolveActivePack, resolvePackN
 import type { NudgeSectionsConfig } from "./surface.js";
 import { coreOutToAgentMessages, extractText } from "./messages.js";
 import { liveOnlyTail } from "./live-only-tail.js";
+import { carryHostSystemMessages } from "./system-passthrough.js";
 import { countThinkingChars, dropCompressReasoning } from "./reasoning-drop.js";
 import { collapseAssistantDegeneration, degenerationNotice, lastAssistantRuns, resolveDegenerationGuard } from "./degeneration.js";
 import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
@@ -700,6 +701,17 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     if (liveTail && liveTail.length > 0) {
       rebuilt.push(...liveTail);
       logInfo("live-only-tail", { sid, event: "appended", tail: liveTail.length, outMsgs: rebuilt.length });
+    }
+
+    // #477 pi 0.86 carries the active toolset on the session system message
+    // (toolsAdded); provider adapters derive request `tools` from it. The
+    // rebuild sources messages from persisted entries, which never include the
+    // system message, so requests went out toolless. Carry the input's system
+    // message(s) back onto the rebuild; strict no-op on hosts without one.
+    const withHostSystem = carryHostSystemMessages(rebuilt, event.messages);
+    if (withHostSystem !== rebuilt) {
+      rebuilt = withHostSystem;
+      logInfo("system-passthrough", { sid, event: "carried", systems: event.messages.filter((m) => (m as { role?: unknown }).role === "system").length, outMsgs: rebuilt.length });
     }
 
     // Always return the transformed array: every message needs its [mNNNNN] ref
