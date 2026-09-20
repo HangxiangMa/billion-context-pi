@@ -239,6 +239,8 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     runtime.clearCompressRetryTracking(ctx.sessionManager.getSessionId());
     runtime.dropHostUsageSamples(ctx.sessionManager.getSessionId());
     runtime.dropSizeDivergence(ctx.sessionManager.getSessionId());
+    runtime.dropTerminalEscape(ctx.sessionManager.getSessionId());
+    runtime.dropTruncationSkipped(ctx.sessionManager.getSessionId());
     resetDelegateUsage();
     setDelegateDisplayUsage("separate");
     setDelegatePolicy(DEFAULT_DELEGATE_POLICY);
@@ -326,6 +328,8 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     runtime.clearCompressRetryTracking(sid);
     runtime.dropHostUsageSamples(sid);
     runtime.dropSizeDivergence(sid);
+    runtime.dropTerminalEscape(sid);
+    runtime.dropTruncationSkipped(sid);
     delegateStatusWidget.dispose();
     closeLogStream();
   });
@@ -488,6 +492,35 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
 
       const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
       await runtime.save(turn.state, ctx);
+
+      // [#464] Surface the kernel's end-game observability signals: they fire
+      // every stuck turn inside the kernel, but before this were invisible —
+      // exactly when compression can no longer save the session is the moment
+      // the user must hear about. One log + one UI notice per episode.
+      if (turn.terminalEscape) {
+        if (runtime.noteTerminalEscape(sid, true)) {
+          logWarn("overflow", {
+            sid,
+            event: "terminal-escape",
+            stuckEvents: turn.terminalEscape.stuckEvents,
+            usage: turn.terminalEscape.usage,
+            tokens: turn.terminalEscape.tokenCount,
+            limit: turn.terminalEscape.modelContextLimit,
+          });
+          if (ctx.hasUI) {
+            ctx.ui.notify(`[ACP] ⚠️ ${turn.terminalEscape.message}`);
+          }
+        }
+      } else {
+        runtime.noteTerminalEscape(sid, false);
+      }
+      if (turn.truncationSkipped) {
+        if (runtime.noteTruncationSkipped(sid, true)) {
+          logWarn("overflow", { sid, event: "truncation-skipped", detail: turn.truncationSkipped });
+        }
+      } else {
+        runtime.noteTruncationSkipped(sid, false);
+      }
 
       logInfo("turn", {
         sid,
