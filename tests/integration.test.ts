@@ -1085,3 +1085,21 @@ test("#415: no pi-subagents → acp_delegate registers normally (regression guar
     fx.cleanup();
   }
 });
+
+test("withAgentDir restores PI_CODING_AGENT_DIR/HOME/USERPROFILE without leaking env", async () => {
+  const prevAgent = process.env.PI_CODING_AGENT_DIR;
+  const prevHome = process.env.HOME;
+  const prevUserProfile = process.env.USERPROFILE;
+  const tmp = mkdtempSync(join(tmpdir(), "acp-env-restore-"));
+  try {
+    await withAgentDir(join(tmp, "agent"), async () => {
+      assert.ok(process.env.PI_CODING_AGENT_DIR?.endsWith("agent"), "PI_CODING_AGENT_DIR points at the fixture");
+      assert.notEqual(process.env.HOME, prevHome, "HOME is isolated inside the fixture");
+    });
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+  assert.equal(process.env.PI_CODING_AGENT_DIR, prevAgent, "PI_CODING_AGENT_DIR restored verbatim (undefined must not become \"undefined\")");
+  assert.equal(process.env.HOME, prevHome, "HOME restored verbatim");
+  assert.equal(process.env.USERPROFILE, prevUserProfile, "USERPROFILE restored verbatim");
+});
