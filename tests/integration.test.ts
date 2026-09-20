@@ -931,7 +931,8 @@ async function withAgentDir(agentDir: string, fn: () => Promise<void>): Promise<
   try {
     await fn();
   } finally {
-    process.env.PI_CODING_AGENT_DIR = prev;
+    if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = prev;
     if (prevHome === undefined) delete process.env.HOME;
     else process.env.HOME = prevHome;
     if (prevUserProfile === undefined) delete process.env.USERPROFILE;
