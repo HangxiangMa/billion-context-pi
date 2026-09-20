@@ -508,7 +508,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
             limit: turn.terminalEscape.modelContextLimit,
           });
           if (ctx.hasUI) {
-            ctx.ui.notify(`[ACP] ⚠️ ${turn.terminalEscape.message}`);
+            ctx.ui.notify(`[ACP] ⚠️ ${turn.terminalEscape.message}`, "warning");
           }
         }
       } else {
