@@ -17,11 +17,13 @@ import { makeCompressTool, isCompressSuccessText, isCompressNoopText } from "./c
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
+import { makeCacheTool } from "./cache-tool.js";
 import { makeDelegateTool, makeDelegateWaitTool, makeDelegateStatusTool, makeDelegateCancelTool, cancelDelegateRun, guideDelegate, runningRunsSnapshot, fleetRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage, setDelegatePolicy, setDelegateDefaults, setDelegateNotifyIfRead, markDelegateResultRead, markDelegateRunReadByCommand, shutdownDelegates, reapOrphanedDelegates } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
 import { mergeSurface, readToolSurfaceWithPacks, resolveActivePack, resolvePackName, surfaceMetaOf } from "./prompt-pack.js";
 import type { NudgeSectionsConfig } from "./surface.js";
 import { coreOutToAgentMessages, extractText } from "./messages.js";
+import { liveOnlyTail } from "./live-only-tail.js";
 import { countThinkingChars, dropCompressReasoning } from "./reasoning-drop.js";
 import { collapseAssistantDegeneration, degenerationNotice, lastAssistantRuns, resolveDegenerationGuard } from "./degeneration.js";
 import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
@@ -122,6 +124,7 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     pi.registerTool(makeDecompressTool(runtime, toolSurface.decompress));
     pi.registerTool(makeSearchTool(runtime, toolSurface.search_context));
     pi.registerTool(makeStatusTool(runtime, toolSurface.acp_status));
+    pi.registerTool(makeCacheTool(runtime, toolSurface.acp_cache));
     for (const { name, options } of makeCommands(runtime, pi)) {
       pi.registerCommand(name, options);
     }
@@ -712,6 +715,17 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       if (ctx.hasUI) {
         ctx.ui.notify(`[ACP] compress failed ${outcome.count}× this turn — nudge paused until the next user message (emergency truncation still active).`);
       }
+    }
+
+    // #471 Re-append host-injected live-only messages (pi-web auto-name adds its
+    // instruction to event.messages without persisting an entry, so a Pi-host
+    // rebuild from entries alone drops them). null = no-op: normal turns align
+    // byte-for-byte and non-Pi hosts already merged live into entries. Append-only
+    // — never touches refs/blocks, so it stays orthogonal to the #459 ref churn.
+    const liveTail = liveOnlyTail(entries, event.messages);
+    if (liveTail && liveTail.length > 0) {
+      rebuilt.push(...liveTail);
+      logInfo("live-only-tail", { sid, event: "appended", tail: liveTail.length, outMsgs: rebuilt.length });
     }
 
     // Always return the transformed array: every message needs its [mNNNNN] ref
