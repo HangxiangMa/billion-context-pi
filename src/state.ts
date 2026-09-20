@@ -2,9 +2,9 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { createInitialState, type CompressionState } from "acp-kernel";
 import { logError, logInfo, logWarn } from "./log.js";
+import { SIDECAR_SCHEMA_VERSION, sidecarProducer } from "./contract.js";
 
 const STATE_SUFFIX = ".acp.json";
-
 export interface LiveRefOrigin {
   rawId: string;
   identity: string;
@@ -72,7 +72,13 @@ export class SessionStateStore {
     if (file) {
       try {
         const raw = await fs.readFile(file, "utf8");
-        const parsed = JSON.parse(raw) as CompressionState & { liveRefOrigins?: unknown; derivedFrom?: unknown; activePack?: unknown };
+        const parsed = JSON.parse(raw) as CompressionState & { liveRefOrigins?: unknown; derivedFrom?: unknown; activePack?: unknown; schemaVersion?: unknown; producer?: unknown };
+        // #368: an unknown NEWER schema means a future writer touched the
+        // file. Best-effort read (same producer family), one warning — but we
+        // never rewrite structures we do not understand beyond the v1 fields.
+        if (typeof parsed.schemaVersion === "number" && parsed.schemaVersion > SIDECAR_SCHEMA_VERSION) {
+          logWarn("state", { event: "schema-newer", file, schemaVersion: parsed.schemaVersion, known: SIDECAR_SCHEMA_VERSION });
+        }
         if (parsed && Array.isArray(parsed.blocks)) {
           state = mergeInitialState(parsed);
           liveRefOrigins = parseLiveRefOrigins(parsed.liveRefOrigins);
@@ -129,7 +135,14 @@ export class SessionStateStore {
     });
     const tmp = path.join(dir, `.acp-tmp-${path.basename(file)}`);
     try {
-      const payload: Record<string, unknown> = { ...state, liveRefOrigins };
+      // #368 contract: schemaVersion + producer head the sidecar; missing = v1
+      // (pre-contract files). Downstream readers skip unknown newer versions.
+      const payload: Record<string, unknown> = {
+        schemaVersion: SIDECAR_SCHEMA_VERSION,
+        producer: sidecarProducer(),
+        ...state,
+        liveRefOrigins,
+      };
       if (derivedFrom) payload.derivedFrom = derivedFrom;
       if (activePack) payload.activePack = activePack;
       await fs.writeFile(tmp, JSON.stringify(payload), "utf8");
