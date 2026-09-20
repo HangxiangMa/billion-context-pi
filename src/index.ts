@@ -158,27 +158,18 @@ function userConfigDisabled(cwd: string): boolean {
     // #467: hand-edited configs commonly carry BOM heads, unquoted keys, or
     // trailing commas (Windows notepad defaults). Strict JSON.parse made every
     // one of those silently mean "not disabled" — the exact opposite of the
-    // user's intent. Repair the common shapes, then warn loudly on whatever
-    // still fails instead of swallowing it.
-    const stripped = text.replace(/^\uFEFF/, "");
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(stripped);
-    } catch {
-      try {
-        parsed = JSON.parse(
-          stripped
-            .replace(/,(?=\s*[}\]])/g, "")
-            .replace(/([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)/g, '$1"$2"$3'),
-        );
-        console.warn(`[bcp] ${file}: repaired non-strict JSON (unquoted keys / trailing commas / BOM) — prefer strict JSON so future config stays portable.`);
-      } catch (e) {
-        console.warn(`[bcp] ${file}: failed to parse (${(e as Error).message}) — treating enabled as NOT set. Fix the file; ACP stays enabled.`);
-        continue;
-      }
+    // user's intent. parseAcpJson repairs the common shapes and warns loudly
+    // on whatever still fails instead of swallowing it.
+    const r = parseAcpJson(file, text);
+    if (r.status === "failed") {
+      console.warn(`[bcp] ${r.reason}`);
+      continue;
     }
-    if (parsed && typeof parsed === "object") {
-      const v = (parsed as Record<string, unknown>).enabled;
+    if (r.status === "repaired") {
+      console.warn(`[bcp] ${r.reason}`);
+    }
+    if (r.value) {
+      const v = r.value.enabled;
       if (v === true || v === false) disabled = v;
       else if (v !== undefined) {
         console.warn(`[bcp] ${file}: enabled must be the literal boolean true/false, got ${JSON.stringify(v)} — ignoring. ACP stays enabled.`);

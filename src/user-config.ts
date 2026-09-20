@@ -52,7 +52,10 @@ export async function loadUserConfig(cwd: string): Promise<UserAcpConfig> {
       continue;
     }
     const r = parseAcpJson(file, raw);
-    if (r.status === "failed") continue;
+    if (r.status === "failed") {
+      console.warn(`[bcp] ${r.reason}`);
+      continue;
+    }
     if (r.status === "repaired") {
       console.warn(`[bcp] ${r.reason}`);
     }
