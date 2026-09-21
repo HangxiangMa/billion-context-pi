@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createAcpExtension } from "../src/index.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
@@ -916,11 +916,27 @@ function standDownFixture(scope: StandDownScope) {
 async function withAgentDir(agentDir: string, fn: () => Promise<void>): Promise<void> {
   const prev = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = agentDir;
+  // Isolate HOME too: prompt/config assembly reads the developer's real
+  // ~/.pi/acp.json — e.g. `compress.promptPack: "lean"` swaps the acpTags
+  // section for its headerless short form and breaks the literal "ACP TAGS"
+  // assertions in these tests. Tests must not depend on the runner's home
+  // config (#484 triage: failed deterministically on any lean-pack dev box,
+  // green on CI's empty HOME — masking as a fake #415 regression).
+  const prevHome = process.env.HOME;
+  const prevUserProfile = process.env.USERPROFILE;
+  const home = join(dirname(agentDir), "home");
+  mkdirSync(home, { recursive: true });
+  process.env.HOME = home;
+  if (prevUserProfile !== undefined) process.env.USERPROFILE = home;
   try {
     await fn();
   } finally {
     if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = prev;
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (prevUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = prevUserProfile;
   }
 }
 
@@ -1068,4 +1084,22 @@ test("#415: no pi-subagents → acp_delegate registers normally (regression guar
   } finally {
     fx.cleanup();
   }
+});
+
+test("withAgentDir restores PI_CODING_AGENT_DIR/HOME/USERPROFILE without leaking env", async () => {
+  const prevAgent = process.env.PI_CODING_AGENT_DIR;
+  const prevHome = process.env.HOME;
+  const prevUserProfile = process.env.USERPROFILE;
+  const tmp = mkdtempSync(join(tmpdir(), "acp-env-restore-"));
+  try {
+    await withAgentDir(join(tmp, "agent"), async () => {
+      assert.ok(process.env.PI_CODING_AGENT_DIR?.endsWith("agent"), "PI_CODING_AGENT_DIR points at the fixture");
+      assert.notEqual(process.env.HOME, prevHome, "HOME is isolated inside the fixture");
+    });
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+  assert.equal(process.env.PI_CODING_AGENT_DIR, prevAgent, "PI_CODING_AGENT_DIR restored verbatim (undefined must not become \"undefined\")");
+  assert.equal(process.env.HOME, prevHome, "HOME restored verbatim");
+  assert.equal(process.env.USERPROFILE, prevUserProfile, "USERPROFILE restored verbatim");
 });
