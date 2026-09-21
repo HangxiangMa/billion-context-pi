@@ -104,6 +104,16 @@ This has two practical implications:
 
 2. **Even with a single compression plugin, interference is still possible in rare cases.** Load order under Pi is determined by filesystem discovery order (`fs.readdirSync` over `.pi/extensions/` → global → packages), which is not fully deterministic. If another (non-compression) extension also hooks the `context` event and happens to load *after* billion-context-pi, it could modify the compressed output. billion-context-pi rebuilds its working set from the session log rather than the chained input, which makes it robust to handlers that run *before* it — but it cannot defend against a handler that runs *after* it. This is a limitation of Pi's extension model; if you observe unexpected context behavior, check whether other installed extensions intercept the `context` event.
 
+### Sidecar contract (downstream tools)
+
+Compression state lives next to the session log in `<sessionFile>.acp.json`. For tools that read it directly (cross-session retrieval, memory layers):
+
+- The file carries `schemaVersion` and `producer` at the top level. **A missing `schemaVersion` means v1.** An unknown *newer* version means fields may have changed — skip the file, log once, never rewrite it.
+- `blocks[]` entries match the exported `BcpBlockV1` type (kernel `CompressionBlock` verbatim); unknown extra fields are additive and must be ignored.
+- The file is always replaced **atomically** (temp file + rename), so a concurrent reader sees either the previous or the next complete file, never a torn write.
+
+Import the contract from TypeScript via `import type { BcpBlockV1 } from "billion-context-pi/contract"`; a JSON Schema for offline validation is published as the `billion-context-pi/contract/schema` subpath. No runtime dependency is required — the file remains the source of truth.
+
 ## Host support
 
 billion-context-pi is built for the **Pi** coding agent (`@earendil-works/pi-coding-agent`) and detects the host at session start — the full client → package table lives in [Which do I need?](#which-do-i-need):
