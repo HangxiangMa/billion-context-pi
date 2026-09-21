@@ -13,6 +13,7 @@ import { applyToolPromptOverrides, type ToolPromptOverrides } from "./surface.js
 import { resolveHostSession } from "./config.js";
 import { defaultCountTokens, parseCompressArgs, viableRanges, formatRanges, type CompressionBlock, type CompressionState, type CompressParseDiagnostics, type NudgeDecision } from "acp-kernel";
 import { countUnicodeEscapes, findUnverifiableUserQuote, sanitizeSummary } from "./summary-sanitize.js";
+import { assertNotAborted } from "./abort.js";
 import { getSystemPromptText } from "./compat.js";
 import { UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
 
@@ -58,11 +59,11 @@ export function makeCompressTool(runtime: AcpRuntime, overrides?: ToolPromptOver
       "Never compress content the current step is actively using.",
     ],
     parameters: CompressParams,
-    async execute(toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
+    async execute(toolCallId, params, signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
       if (runtime.refused) return { details: undefined, content: [{ type: "text", text: runtime.refusalMessage ?? UNSUPPORTED_HOST_MESSAGE }] };
       let result: string;
       try {
-        result = await handleCompress(params as CompressArgs, runtime, ctx, toolCallId);
+        result = await handleCompress(params as CompressArgs, runtime, ctx, toolCallId, signal);
       } catch (e) {
         logThrow("compress", e, { sid: ctx.sessionManager.getSessionId(), ranges: typeof (params as CompressArgs).content === "string" ? "string" : ((params as CompressArgs).content?.length ?? 0) });
         throw e;
@@ -423,7 +424,8 @@ function tierReadyHint(state: CompressionState, config: ReturnType<AcpRuntime["c
   return "";
 }
 
-async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId?: string): Promise<string> {
+async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId?: string, signal?: AbortSignal): Promise<string> {
+  assertNotAborted(signal);
   const maybeRanges = normalizeRanges(args);
   // Argument errors throw (not return): pi-agent-core only sets isError:true
   // on THROWN tool errors, and the failure counter keys off isError. A
@@ -433,6 +435,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   const ranges = maybeRanges;
   if (ranges.length === 0) return "No ranges provided.";
   const { state: initialState, coreMessages, entries } = await runtime.stateFor(ctx);
+  assertNotAborted(signal);
   const config = runtime.configFor(ctx);
   // Sent-view arbitration — the same scale as the context transform and
   // acp_status (see src/index.ts): never the session-tree tokenCount.
@@ -505,6 +508,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     state,
     config,
   });
+  assertNotAborted(signal);
   const rewriteSpans = applied.result.blocksCreated > 0
     ? tier3OnlyRewrite(applied.state.blocks.slice(-applied.result.blocksCreated), applied.state.blocks)
     : null;

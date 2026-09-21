@@ -5,6 +5,7 @@ import { applyToolPromptOverrides, type ToolPromptOverrides } from "./surface.js
 import { debug, logError, logInfo, logThrow } from "./log.js";
 import { parseBlockIdArg, collectBlockContent, type CompressionBlock } from "acp-kernel";
 import { entriesToCoreMessages } from "./messages.js";
+import { assertNotAborted } from "./abort.js";
 import { UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
 import { writeFile, mkdir } from "node:fs/promises";
 import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
@@ -46,11 +47,11 @@ export function makeDecompressTool(runtime: AcpRuntime, overrides?: ToolPromptOv
       "Use full:true to recurse through all nested tiers to original messages.",
     ],
     parameters: DecompressParams,
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
       if (runtime.refused) return { details: undefined, content: [{ type: "text", text: runtime.refusalMessage ?? UNSUPPORTED_HOST_MESSAGE }] };
       let result: string;
       try {
-        result = await handleDecompress(params as DecompressArgs, runtime, ctx);
+        result = await handleDecompress(params as DecompressArgs, runtime, ctx, signal);
       } catch (e) {
         logThrow("decompress", e, { sid: ctx.sessionManager.getSessionId(), blockId: (params as DecompressArgs).blockId });
         throw e;
@@ -217,8 +218,10 @@ async function handleMessageRef(
   ].join("\n");
 }
 
-async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: ExtensionContext): Promise<string> {
+async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, signal?: AbortSignal): Promise<string> {
+  assertNotAborted(signal);
   const { state, coreMessages } = await runtime.stateFor(ctx);
+  assertNotAborted(signal);
   const arg = (args.blockId ?? "").trim();
 
   // Resolve what `arg` refers to. Check message-ref FIRST (data-driven: a ref
@@ -264,6 +267,7 @@ async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: 
     return targetPath.error;
   }
 
+  assertNotAborted(signal);
   await mkdir(AUTO_DIR, { recursive: true }).catch(() => {});
   await writeFile(targetPath, text, "utf8");
 
