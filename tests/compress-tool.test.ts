@@ -365,3 +365,43 @@ test("compressPanelBlocks counts tier labels correctly ((Tn) carries a paren)", 
   assert.equal(compressPanelBlocks("▣ ACP | 61.1K → 13.7K tokens (~47.4K reclaimed, blocks: b3(T2)=m00044–m00097, b4(T2)=m00103–m00123*)"), 2);
   assert.equal(compressPanelBlocks("No ranges provided."), -1);
 });
+
+// issue #420: a successful compress must carry the POST-compression snapshot
+// of remaining compressible ranges, so a same-turn follow-up compress has its
+// refs without a planning acp_status call — and must stay silent once nothing
+// viable remains.
+test("compress success result lists remaining compressible ranges, then goes quiet", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000, preserveRecentMessages: 1 })(api as any);
+  const BIG = "中".repeat(6000);
+  const entries = [userMsg("e1", BIG), userMsg("e2", BIG), userMsg("e3", BIG)];
+  const stateFile = "/tmp/pai-acp-compress-success-ranges.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const ctx = fakeCtx(entries, stateFile);
+  ctx.__setUsage(100_000);
+  await runContextRound(handlers, ctx); // prime refs
+
+  const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+  async function doCompress(callId: string, range: { startId: string; endId: string; summary: string }) {
+    const out = await compressTool.execute(callId, { content: [range] }, undefined, undefined, ctx);
+    return typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
+  }
+
+  const first = await doCompress("tc1", { startId: "m00001", endId: "m00001", summary: "first block: success-path ranges snapshot test with a longer summary to clear the minimum length gate" });
+  assert.ok(first.includes("▣ ACP"), `first compress failed: ${first}`);
+  assert.ok(!first.includes("Errors:"), `first compress rejected: ${first}`);
+  assert.ok(
+    first.includes("Current compressible ranges (use these refs exactly as listed)"),
+    `success must carry the remaining-ranges snapshot: ${first}`,
+  );
+  assert.ok(first.includes("m00002"), `snapshot must list the untouched range m00002: ${first}`);
+
+  await runContextRound(handlers, ctx);
+  const second = await doCompress("tc2", { startId: "m00002", endId: "m00003", summary: "second block: everything remaining folded in this range so the snapshot must go quiet" });
+  assert.ok(second.includes("▣ ACP"), `second compress failed: ${second}`);
+  assert.ok(!second.includes("Errors:"), `second compress rejected: ${second}`);
+  assert.ok(
+    !second.includes("Current compressible ranges"),
+    `no snapshot noise once nothing viable remains: ${second}`,
+  );
+});

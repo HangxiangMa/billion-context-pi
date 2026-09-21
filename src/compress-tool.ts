@@ -599,5 +599,15 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   const lines = [`▣ ACP | ${formatK(beforeTokens)} → ${formatK(afterTokens)} tokens (~${formatK(reclaimed)} reclaimed, ${spanClause})`];
   if (warnings.length > 0) lines.push("⚠️ " + warnings.join("; "));
   if (errors.length > 0) lines.push("Errors: " + errors.join("; "));
+  // #420: carry the post-compression snapshot so a same-turn follow-up
+  // compress has its refs without a planning acp_status call. Computed from
+  // afterTurn (processTurn over the applied state), so the list reflects
+  // what actually remains — not the pre-fold view.
+  if (blocksCreated > 0) {
+    const afterSnapshot = compressibleSnapshotText(afterTurn.nudge);
+    if (!afterSnapshot.startsWith("No compressible")) {
+      lines.push("Current compressible ranges (use these refs exactly as listed):\n" + afterSnapshot);
+    }
+  }
   return lines.join("\n");
 }
