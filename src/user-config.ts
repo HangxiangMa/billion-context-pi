@@ -8,7 +8,7 @@ import type { PiPromptSections } from "./system-prompt.js";
 import type { NudgeSectionsConfig, ToolPromptsConfig } from "./surface.js";
 import type { DegenerationGuardConfig } from "./degeneration.js";
 import type { ThrottleRetryConfig } from "./throttle-retry.js";
-import { debug, logWarn } from "./log.js";
+import { debug } from "./log.js";
 
 /** User-facing config keys (subset of AdapterConfig). Loaded from
  *  ~/.<CONFIG_DIR_NAME>/acp.json (global) and <cwd>/.<CONFIG_DIR_NAME>/acp.json
@@ -37,27 +37,94 @@ export interface UserAcpConfig {
 }
 
 /** Read global + project acp.json, project overrides global. Returns {} on any
- *  error (missing file, bad JSON) — never throws. */
+ *  error (missing file, bad JSON) — never throws. Malformed-but-repairable
+ *  files are salvaged with a loud warning instead of silently meaning "not
+ *  disabled" / "no config" (#467). */
 export async function loadUserConfig(cwd: string): Promise<UserAcpConfig> {
   const home = homedir();
   const merged: UserAcpConfig = {};
   for (const base of [join(home, CONFIG_DIR_NAME), join(cwd, CONFIG_DIR_NAME)]) {
     const file = join(base, "acp.json");
+    let raw: string;
     try {
-      const raw = await fs.readFile(file, "utf8");
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === "object") {
-        Object.assign(merged, pickKnown(parsed));
-        debug.event("config-loaded", { file });
-      }
-    } catch (e) {
-      const code = (e as NodeJS.ErrnoException).code;
-      if (code !== "ENOENT") {
-        logWarn("config", { event: "load-failed", file, error: e instanceof Error ? e.message : String(e) });
-      }
+      raw = await fs.readFile(file, "utf8");
+    } catch {
+      continue;
+    }
+    const r = parseAcpJson(file, raw);
+    if (r.status === "failed") {
+      console.warn(`[bcp] ${r.reason}`);
+      continue;
+    }
+    if (r.status === "repaired") {
+      console.warn(`[bcp] ${r.reason}`);
+    }
+    if (r.value && typeof r.value === "object") {
+      Object.assign(merged, pickKnown(r.value));
+      debug.event("config-loaded", { file });
     }
   }
   return merged;
+}
+
+export interface AcpJsonParse {
+  status: "ok" | "repaired" | "failed";
+  value?: Record<string, unknown>;
+  reason?: string;
+}
+
+/** Lenient parse of a hand-edited acp.json (#467): strict JSON first, then
+ *  repair the common hand-edit shapes (BOM head, trailing commas, unquoted
+ *  keys) with a loud warning, then give up with a diagnosed reason. The
+ *  enabled:false master switch must survive a notepad edit — silently
+ *  treating the user's file as absent is the exact opposite of intent. */
+export function parseAcpJson(file: string, raw: string): AcpJsonParse {
+  const stripped = raw.replace(/^\uFEFF/, "");
+  const strict = tryJson(stripped);
+  if (strict.ok) return { status: "ok", value: strict.value };
+  const repaired = tryJson(
+    stripped
+      .replace(/,(?=\s*[}\]])/g, "")
+      .replace(/([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)/g, '$1"$2"$3'),
+  );
+  if (repaired.ok) {
+    return {
+      status: "repaired",
+      value: repaired.value,
+      reason: `${file}: repaired non-strict JSON (BOM / unquoted keys / trailing commas) — prefer strict JSON so future config stays portable`,
+    };
+  }
+  return { status: "failed", reason: `${file}: failed to parse (${diagnoseJsonFailure(stripped, strict.error)}) — fix the file; this acp.json is ignored` };
+}
+
+function tryJson(text: string): { ok: true; value: Record<string, unknown> } | { ok: false; error: unknown } {
+  try {
+    const v = JSON.parse(text);
+    return v && typeof v === "object" ? { ok: true, value: v as Record<string, unknown> } : { ok: false, error: new Error("top-level value is not an object") };
+  } catch (e) {
+    return { ok: false, error: e };
+  }
+}
+
+// Ordered heuristics: most specific common cause first, parser msg as fallback.
+function diagnoseJsonFailure(raw: string, err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (raw.length > 0 && raw.charCodeAt(0) === 0xfeff) {
+    return 'file starts with a BOM (byte-order mark); save it as plain UTF-8 without BOM (Windows Notepad → Save as → encoding "UTF-8", not "UTF-8 with BOM")';
+  }
+  if (/\,\s*[}\]]/.test(raw)) {
+    return "trailing comma is not allowed in JSON (remove the last comma before } or ])";
+  }
+  if (/\/\/|\/\*/.test(raw)) {
+    return "comments are not allowed in JSON (delete // and /* */ lines)";
+  }
+  if (/property name/i.test(msg)) {
+    return 'object keys must be wrapped in double quotes (write "enabled": false, not enabled: false)';
+  }
+  if (/Unexpected token/i.test(msg)) {
+    return `invalid JSON syntax (${msg})`;
+  }
+  return msg;
 }
 
 function join(... parts: string[]): string {
