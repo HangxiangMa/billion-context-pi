@@ -174,6 +174,19 @@ export interface AcpRuntime {
   noteSizeDivergence(sid: string, divergent: boolean): boolean;
   /** Drop a session's size-divergence episode (session_shutdown). */
   dropSizeDivergence(sid: string): void;
+  /** Track the kernel's terminal-escape signal (issue #464): returns true
+   *  exactly once per episode — the first consecutive stuck fire — so the
+   *  caller logs/notifies once instead of every turn. A non-escaping turn
+   *  ends the episode. */
+  noteTerminalEscape(sid: string, active: boolean): boolean;
+  /** Drop a session's terminal-escape episode (session_shutdown). */
+  dropTerminalEscape(sid: string): void;
+  /** Track the kernel's truncation-skipped signal (issue #464): returns true
+   *  exactly once per episode for low-frequency diagnostics. A turn that
+   *  truncates (or skips nothing) ends the episode. */
+  noteTruncationSkipped(sid: string, active: boolean): boolean;
+  /** Drop a session's truncation-skipped episode (session_shutdown). */
+  dropTruncationSkipped(sid: string): void;
 }
 // omp fires the context event before the current user message is persisted to
 // the session branch, so merge event.messages (exact messages about to be sent,
@@ -442,6 +455,37 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     sizeDivergenceStreaks.delete(sid);
   }
 
+  // [#464] Kernel observability signals (acp-kernel#302): terminalEscape is
+  // the "compression cannot save this session" last signal, truncationSkipped
+  // explains a silent emergency-truncate no-op. One episode flag each — the
+  // kernel fires them every stuck turn, users must see them once.
+  const terminalEscapeEpisodes = new Set<string>();
+  function noteTerminalEscape(sid: string, active: boolean): boolean {
+    if (!active) {
+      terminalEscapeEpisodes.delete(sid);
+      return false;
+    }
+    if (terminalEscapeEpisodes.has(sid)) return false;
+    terminalEscapeEpisodes.add(sid);
+    return true;
+  }
+  function dropTerminalEscape(sid: string): void {
+    terminalEscapeEpisodes.delete(sid);
+  }
+  const truncationSkipEpisodes = new Set<string>();
+  function noteTruncationSkipped(sid: string, active: boolean): boolean {
+    if (!active) {
+      truncationSkipEpisodes.delete(sid);
+      return false;
+    }
+    if (truncationSkipEpisodes.has(sid)) return false;
+    truncationSkipEpisodes.add(sid);
+    return true;
+  }
+  function dropTruncationSkipped(sid: string): void {
+    truncationSkipEpisodes.delete(sid);
+  }
+
   // [#361] session ids already logged for the strict-echo auto-disable, so the
   // info event fires once per session rather than once per LLM call.
   const strictEchoLogged = new Set<string>();
@@ -642,4 +686,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   let refused = false;
   let refusalMessage: string | null = null;
   let delegateStoodDown = false;
-  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale, noteHostUsage, dropHostUsageSamples, noteSizeDivergence, dropSizeDivergence };}
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale, noteHostUsage, dropHostUsageSamples, noteSizeDivergence, dropSizeDivergence, noteTerminalEscape, dropTerminalEscape, noteTruncationSkipped, dropTruncationSkipped };}
