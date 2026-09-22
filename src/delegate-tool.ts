@@ -222,6 +222,7 @@ interface DelegateRun {
    *  had already read the result file. Treated as delivered (injected=true)
    *  so wait/recovery never re-surface the result. */
   readSuppressed?: boolean;
+  activity?: string;
 }
 const runs = new Map<string, DelegateRun>();
 
@@ -1158,7 +1159,7 @@ export function cancelDelegateRun(runId: string): boolean {
     run.waiter?.();
   } else {
     try {
-      if (run.child) terminateDelegateChild(run.child, "SIGTERM");
+      if (run.child) run.child.kill("SIGTERM");
     } catch (err) {
       debug.event("delegate-cancel-kill-error", {
         runId,
@@ -1209,7 +1210,7 @@ export async function guideDelegate(
       task,
       resumeFrom: canResume ? runId : undefined,
       cwd: run.cwd,
-      model: run.model,
+      model: undefined,
       async: true,
     },
     ctx,

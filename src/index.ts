@@ -19,7 +19,7 @@ import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeCacheTool } from "./cache-tool.js";
-import { makeDelegateTool, makeDelegateWaitTool, makeDelegateStatusTool, makeDelegateCancelTool, cancelDelegateRun, guideDelegate, runningRunsSnapshot, fleetRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage, setDelegatePolicy, setDelegateDefaults, setDelegateNotifyIfRead, markDelegateResultRead, markDelegateRunReadByCommand, shutdownDelegates, reapOrphanedDelegates } from "./delegate-tool.js";
+import { makeDelegateTool, makeDelegateWaitTool, makeDelegateStatusTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage, setDelegatePolicy, setDelegateDefaults, setDelegateNotifyIfRead, markDelegateResultRead, markDelegateRunReadByCommand } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
 import { mergeSurface, readToolSurfaceWithPacks, resolveActivePack, resolvePackName, surfaceMetaOf } from "./prompt-pack.js";
 import type { NudgeSectionsConfig } from "./surface.js";
