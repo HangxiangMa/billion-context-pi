@@ -45,15 +45,15 @@ test("formatCompactTokens matches pi formatTokens at every boundary", () => {
   assert.equal(formatCompactTokens(10000000), "10M");
 });
 
-test("updateFooterStatus does not render delegate usage in the footer", () => {
+test("updateFooterStatus renders cumulative delegate usage and dedupes", () => {
   const mock = makeMock();
   resetDelegateUsage();
   addDelegateUsage(USAGE);
   initFooterStatus(mock.ctx);
   updateFooterStatus();
-  assert.deepEqual(mock.calls, [["billion-context-pi", undefined]]);
+  assert.deepEqual(mock.calls, [["billion-context-pi", "sub-agents \u219112k \u219331 ($0.0016)"]]);
   updateFooterStatus();
-  assert.equal(mock.calls.length, 1, "usage is owned by the unified task dock");
+  assert.equal(mock.calls.length, 1, "unchanged text does not re-set status");
   disposeFooterStatus();
 });
 
@@ -82,7 +82,7 @@ test("disposeFooterStatus clears the status and detaches ui", () => {
   addDelegateUsage(USAGE);
   initFooterStatus(mock.ctx);
   disposeFooterStatus();
-  assert.deepEqual(mock.calls, [["billion-context-pi", undefined]], "init already clears the legacy status");
+  assert.deepEqual(mock.calls, [["billion-context-pi", undefined]], "dispose clears the status");
   updateFooterStatus();
   assert.equal(mock.calls.length, 1, "no setStatus after dispose");
 });
@@ -99,6 +99,7 @@ test("updateFooterStatus does not churn setStatus across repeated empty ticks", 
   addDelegateUsage(USAGE);
   updateFooterStatus();
   updateFooterStatus();
-  assert.equal(mock.calls.length, 1, "usage never returns to the footer");
+  assert.equal(mock.calls.length, 2, "usage change fires once more then dedups");
+  assert.deepEqual(mock.calls[1], ["billion-context-pi", "sub-agents \u219112k \u219331 ($0.0016)"]);
   disposeFooterStatus();
 });

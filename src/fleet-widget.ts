@@ -1,10 +1,9 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { FleetRunView } from "./delegate-tool.js";
-import { getDelegateUsage } from "./delegate-tool.js";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { initFooterStatus, updateFooterStatus, disposeFooterStatus } from "./footer-status.js";
 
-const BRIDGE_CHANNEL = "billion-context-pi:delegate:v1";
+const DELEGATE_WIDGET_KEY = "billion-context-pi-delegates";
 const REFRESH_MS = 500;
+const MAX_TASK_LEN = 48;
 
 interface WidgetRun {
   runId: string;
@@ -14,71 +13,142 @@ interface WidgetRun {
 }
 
 type RunsSnapshot = () => WidgetRun[];
-type FleetSnapshot = () => FleetRunView[];
 
-let pi: ExtensionAPI | undefined;
+let ui: ExtensionContext["ui"] | undefined;
 let timer: ReturnType<typeof setInterval> | undefined;
+let lastRenderKey = "";
 let runsSnapshot: RunsSnapshot | undefined;
-let fleetSnapshot: FleetSnapshot | undefined;
+let fleetShortcut = "";
 
-export function formatShortcutLabel(shortcut: string): string {
-  return shortcut.split("+").map((part) => {
-    const normalized = part.trim().toLowerCase();
-    if (normalized === "ctrl") return "Ctrl";
-    if (normalized === "alt") return "Alt";
-    if (normalized === "shift") return "Shift";
-    if (normalized === "super") return "Super";
-    return normalized.length === 1 ? normalized.toUpperCase() : part.trim();
-  }).join("+");
+function truncateTask(task: string): string {
+  const oneLine = task.replace(/\n/g, " ").trim();
+  if (oneLine.length <= MAX_TASK_LEN) return oneLine;
+  return `${oneLine.slice(0, MAX_TASK_LEN - 1)}…`;
 }
 
-function emitBridge(): void {
-  if (!pi?.events || !fleetSnapshot) return;
-  try {
-    const runs = fleetSnapshot().map((r) => ({
-      id: r.runId, agent: r.agent, task: r.task, status: r.status, stage: r.stage,
-      startedAt: r.startedAt, finishedAt: r.finishedAt, model: r.model,
-      summary: r.summary, activity: r.activity,
-      transcriptFile: r.transcriptFile ?? r.sessionFile,
-      cost: r.usage?.cost.total,
-      tokens: r.usage ? { input: r.usage.input, output: r.usage.output } : undefined,
-    }));
-    const usage = getDelegateUsage();
-    pi.events.emit(BRIDGE_CHANNEL, {
-      runs,
-      usage: usage ? { input: usage.input, output: usage.output, cost: usage.cost.total } : undefined,
-    });
-  } catch {
-    // Best-effort UI hint; never break delegation.
-  }
+export function formatShortcutLabel(shortcut: string): string {
+  return shortcut
+    .split("+")
+    .map((part) => {
+      const normalized = part.trim().toLowerCase();
+      if (normalized === "ctrl") return "Ctrl";
+      if (normalized === "alt") return "Alt";
+      if (normalized === "shift") return "Shift";
+      if (normalized === "super") return "Super";
+      return normalized.length === 1 ? normalized.toUpperCase() : part.trim();
+    })
+    .join("+");
+}
+
+function renderLines(runs: WidgetRun[]): string[] | undefined {
+  if (runs.length === 0) return undefined;
+  const now = Date.now();
+  const header = runs.length === 1
+    ? `acp_delegate · 1 running`
+    : `acp_delegate · ${runs.length} running`;
+  const rows = runs.map((r) => {
+    const elapsed = Math.max(0, Math.round((now - r.startedAt) / 1000));
+    return `  ● ${r.agent} (${elapsed}s) — ${truncateTask(r.task)}`;
+  });
+  const hint = fleetShortcut
+    ? `  /acp-fleet · ${formatShortcutLabel(fleetShortcut)} — inspect`
+    : "  /acp-fleet — inspect";
+  return [header, ...rows, hint];
+}
+
+function renderKeyFor(runs: WidgetRun[]): string {
+  return runs
+    .map((r) => `${r.agent}:${Math.round((Date.now() - r.startedAt) / 1000)}:${truncateTask(r.task)}`)
+    .join("|");
 }
 
 function stopTimer(): void {
-  if (timer) { clearInterval(timer); timer = undefined; }
+  if (timer) {
+    clearInterval(timer);
+    timer = undefined;
+  }
+}
+
+function clearWidget(): void {
+  if (!ui) return;
+  try {
+    ui.setWidget(DELEGATE_WIDGET_KEY, undefined);
+  } catch {
+    // session is tearing down — best effort
+  }
 }
 
 function refresh(): void {
-  emitBridge();
+  if (!ui) return;
+  const runs = runsSnapshot ? runsSnapshot() : [];
+  if (runs.length === 0) {
+    // Empty list: clear the widget and stop the timer so an idle TUI does not
+    // tick forever. The next poke() (on a new spawn) restarts it.
+    if (lastRenderKey !== "") {
+      lastRenderKey = "";
+      clearWidget();
+    }
+    // Final accumulated usage must still be shown after the last delegate
+    // finishes, so refresh the footer before stopping the timer.
+    updateFooterStatus();
+    stopTimer();
+    return;
+  }
+  const sorted = [...runs].sort((a, b) => a.startedAt - b.startedAt);
+  // Debounce: skip re-render if the visible state (agent + elapsed-second +
+  // count + task) hasn't changed since last render. Elapsed is rounded to
+  // seconds, so this naturally re-renders ~once per second per run.
+  const renderKey = renderKeyFor(sorted);
+  if (renderKey === lastRenderKey) return;
+  lastRenderKey = renderKey;
+  const lines = renderLines(sorted);
+  try {
+    ui.setWidget(DELEGATE_WIDGET_KEY, lines, { placement: "belowEditor" });
+  } catch {
+    // Real teardown goes through dispose() (session_shutdown). setWidget does
+    // not throw "stale" — if it ever throws here, best effort is to clear ui
+    // so the next setContext rebinds.
+    ui = undefined;
+    stopTimer();
+  }
+  // Delegates still running: keep the footer usage line fresh too (deduped
+  // inside updateFooterStatus, so this is O(1) per 500ms tick).
   updateFooterStatus();
-  if (runsSnapshot?.().length === 0) stopTimer();
 }
 
 export const delegateStatusWidget = {
-  setContext(ctx: ExtensionContext, snapshot: RunsSnapshot, extApi?: ExtensionAPI, fleet?: FleetSnapshot, _shortcut?: string): void {
+  setContext(ctx: ExtensionContext, snapshot: RunsSnapshot, shortcut?: string): void {
+    // Only the interactive TUI renders widgets. RPC mode has hasUI === true but
+    // its setWidget just emits extension_ui_request notifications to an RPC
+    // client — useless here and a needless ~1Hz chatter. print/json have
+    // hasUI === false. Guard on the mode directly (types.d.ts: "Use \"tui\" to
+    // guard terminal-only UI").
     if (ctx.mode !== "tui") return;
     initFooterStatus(ctx);
-    pi = extApi;
+    ui = ctx.ui;
     runsSnapshot = snapshot;
-    fleetSnapshot = fleet;
-    if (!timer) { timer = setInterval(refresh, REFRESH_MS); timer.unref?.(); }
+    fleetShortcut = shortcut ?? "";
+    if (!timer) {
+      timer = setInterval(refresh, REFRESH_MS);
+      timer.unref?.();
+    }
     refresh();
   },
   dispose(): void {
-    stopTimer(); disposeFooterStatus();
-    pi = undefined; runsSnapshot = undefined; fleetSnapshot = undefined;
+    stopTimer();
+    clearWidget();
+    disposeFooterStatus();
+    ui = undefined;
+    lastRenderKey = "";
+    fleetShortcut = "";
   },
   poke(): void {
-    if (pi && !timer) { timer = setInterval(refresh, REFRESH_MS); timer.unref?.(); }
+    // A new spawn may arrive after refresh() stopped the timer on an empty
+    // list. Restart it so the widget updates.
+    if (ui && !timer) {
+      timer = setInterval(refresh, REFRESH_MS);
+      timer.unref?.();
+    }
     refresh();
   },
 };

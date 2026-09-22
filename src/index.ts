@@ -5,6 +5,7 @@ import type {
   SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME } from "./config-dir.js";
+import { parseAcpJson } from "./user-config.js";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -18,17 +19,19 @@ import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeCacheTool } from "./cache-tool.js";
-import { makeDelegateTool, makeDelegateWaitTool, makeDelegateStatusTool, makeDelegateCancelTool, cancelDelegateRun, guideDelegate, runningRunsSnapshot, fleetRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage, setDelegatePolicy, setDelegateDefaults, setDelegateNotifyIfRead, markDelegateResultRead, markDelegateRunReadByCommand, shutdownDelegates, reapOrphanedDelegates } from "./delegate-tool.js";
+import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage, setDelegatePolicy, setDelegateDefaults, setDelegateNotifyIfRead, markDelegateResultRead, markDelegateRunReadByCommand } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
 import { mergeSurface, readToolSurfaceWithPacks, resolveActivePack, resolvePackName, surfaceMetaOf } from "./prompt-pack.js";
 import type { NudgeSectionsConfig } from "./surface.js";
 import { coreOutToAgentMessages, extractText } from "./messages.js";
 import { liveOnlyTail } from "./live-only-tail.js";
+import { carryHostSystemMessages } from "./system-passthrough.js";
 import { countThinkingChars, dropCompressReasoning } from "./reasoning-drop.js";
 import { collapseAssistantDegeneration, degenerationNotice, lastAssistantRuns, resolveDegenerationGuard } from "./degeneration.js";
 import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import { openFleetInspector } from "./fleet-inspector.js";
+import { applyStripImages } from "./strip-images.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
 import { collectCoveredMessageIds, estimateTokens, collectImageTokens, modelSupportsImages, sentViewTokenCount } from "./tokens.js";
@@ -50,10 +53,12 @@ import { applyOutputHeadroom, inspectOverflowMessage, resolveOutputHeadroomCap }
 import { FORK_HOST_WARNING_MESSAGE, UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
 import { isDeclaredForkHost, isUnsupportedHost } from "./host.js";
 import { isBiliProxyBaseUrl, PROXY_STAND_DOWN_MESSAGE, nativeStandDownMessage } from "./proxy-detect.js";
-import { shouldAcpOwnCompaction } from "./compaction-gate.js";
 import { findPiSubagentsInstalls, resolveAgentDir, DELEGATE_STAND_DOWN_MESSAGE } from "./setup-subagent-tools.js";
 
-// Host-facing API for multi-session hosts (docs/host-adapter.md, #367).
+// Host-facing API for multi-session hosts (docs/host-adapter.md, #367): the
+// extension keeps its own runtime instance private; hosts build their own via
+// createRuntime — derivation works across instances because it only touches
+// on-disk sidecars through session refs.
 export { createRuntime } from "./runtime.js";
 export type { AcpRuntime, SessionRef } from "./runtime.js";
 export { deriveChildState } from "./state.js";
@@ -115,6 +120,7 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     wireDelegateReadTracking(pi);
     wireSessionLifecycle(pi, runtime, standDownIfProxied);
     wireContextTransform(pi, runtime, standDownIfProxied);
+    wireBeforeProviderRequest(pi, runtime, standDownIfProxied);
     wireSystemPrompt(pi, runtime);
     wireToolGuardrails(pi, runtime);
     wireOverflowSelfHeal(pi, runtime);
@@ -139,18 +145,37 @@ export default createAcpExtension();
 // no tools, no system prompt, no context transform, and no compaction-cancel,
 // leaving Pi's native context management in control (issue #250: models too
 // small to handle ACP). Project acp.json overrides global; only a literal
-// enabled:true/false counts; missing/bad files mean "not disabled".
+// enabled:true/false counts; missing files mean "not disabled", while bad
+// files are repaired when possible and otherwise warned about loudly (#467).
 function userConfigDisabled(cwd: string): boolean {
   let disabled: boolean | undefined;
   for (const base of [join(homedir(), CONFIG_DIR_NAME), join(cwd, CONFIG_DIR_NAME)]) {
+    const file = join(base, "acp.json");
+    let text: string;
     try {
-      const parsed: unknown = JSON.parse(readFileSync(join(base, "acp.json"), "utf8"));
-      if (parsed && typeof parsed === "object") {
-        const v = (parsed as Record<string, unknown>).enabled;
-        if (v === true || v === false) disabled = v;
-      }
+      text = readFileSync(file, "utf8");
     } catch {
-      // missing file / bad JSON → not disabled
+      continue; // missing file → nothing to say
+    }
+    // #467: hand-edited configs commonly carry BOM heads, unquoted keys, or
+    // trailing commas (Windows notepad defaults). Strict JSON.parse made every
+    // one of those silently mean "not disabled" — the exact opposite of the
+    // user's intent. parseAcpJson repairs the common shapes and warns loudly
+    // on whatever still fails instead of swallowing it.
+    const r = parseAcpJson(file, text);
+    if (r.status === "failed") {
+      console.warn(`[bcp] ${r.reason}`);
+      continue;
+    }
+    if (r.status === "repaired") {
+      console.warn(`[bcp] ${r.reason}`);
+    }
+    if (r.value) {
+      const v = r.value.enabled;
+      if (v === true || v === false) disabled = v;
+      else if (v !== undefined) {
+        console.warn(`[bcp] ${file}: enabled must be the literal boolean true/false, got ${JSON.stringify(v)} — ignoring. ACP stays enabled.`);
+      }
     }
   }
   return disabled === false;
@@ -160,8 +185,8 @@ function userConfigDisabled(cwd: string): boolean {
 // opencode-acp requiring opencode's compaction.auto = false). On a refused host
 // (OMP) we stand down and let the host compact normally instead.
 function wireCompactionDisable(pi: ExtensionAPI, runtime: AcpRuntime): void {
-  pi.on("session_before_compact", (_event, ctx) => {
-    if (runtime.refused || !shouldAcpOwnCompaction(ctx)) return;
+  pi.on("session_before_compact", () => {
+    if (runtime.refused) return;
     return { cancel: true };
   });
 }
@@ -213,16 +238,15 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       }
       return;
     }
-    // Declared fork hosts are admitted but carry a known limitation (#454):
-    // their in-process live-entries integration can drift the nudge's example
-    // refs from the session's real refs as the session grows, so compress
-    // calls may start failing with "does not exist in this session". Warn at
-    // admission instead of letting users discover it mid-session; root fix is
-    // tracked in #459. Log per session (support logs need the attribution),
-    // notify once per process like the refusal path above.
+    // Declared fork hosts are admitted with a caveat (#454/#459): live-tail
+    // refs are content-stable while the host's view grows append-only; a host
+    // that rewrites in-flight messages can still drift them, so warn at
+    // admission and point long sessions at the proxy. Log per session (support
+    // logs need the attribution), notify once per process like the refusal
+    // path above.
     if (isDeclaredForkHost() && !isPiHost(ctx.sessionManager)) {
       const sid = ctx.sessionManager.getSessionId();
-      logWarn("host", { event: "fork-host-admitted", sid, knownLimitation: "ref-drift", seeIssue: "#454", rootFix: "#459" });
+      logWarn("host", { event: "fork-host-admitted", sid, hardening: "#459", proxy: "billion-context" });
       if (!forkWarned) {
         forkWarned = true;
         if (ctx.hasUI) ctx.ui.notify(FORK_HOST_WARNING_MESSAGE, "warning");
@@ -230,16 +254,14 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       }
     }
     if (standDownIfProxied(ctx)) return;
-    // Recover detached delegates left by a crashed/force-killed Pi before
-    // registering this session's tools. The sidecars are owner-PID guarded so
-    // concurrent live Pi sessions are not touched.
-    await reapOrphanedDelegates();
     runtime.store.invalidate();
     runtime.clearNudgeTracking(ctx.sessionManager.getSessionId());
     runtime.throttleFor(ctx.sessionManager.getSessionId()).reset();
     runtime.clearCompressRetryTracking(ctx.sessionManager.getSessionId());
     runtime.dropHostUsageSamples(ctx.sessionManager.getSessionId());
     runtime.dropSizeDivergence(ctx.sessionManager.getSessionId());
+    runtime.dropTerminalEscape(ctx.sessionManager.getSessionId());
+    runtime.dropTruncationSkipped(ctx.sessionManager.getSessionId());
     resetDelegateUsage();
     setDelegateDisplayUsage("separate");
     setDelegatePolicy(DEFAULT_DELEGATE_POLICY);
@@ -296,32 +318,13 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     if (delegatePolicy.enabled && !runtime.delegateStoodDown) {
       pi.registerTool(makeDelegateTool(pi));
       pi.registerTool(makeDelegateWaitTool(pi));
-      pi.registerTool(makeDelegateStatusTool(pi));
       pi.registerTool(makeDelegateCancelTool(pi));
       // Not every host implements the full ExtensionAPI surface (older pi,
       // embedded hosts) — shortcuts are a TUI nicety, never load-bearing.
       if (typeof pi.registerShortcut === "function" && delegatePolicy.fleetShortcut !== "") {
         pi.registerShortcut(delegatePolicy.fleetShortcut as KeyId, {
-          description: "Inspect acp_delegate runs (live list + transcript; c cancel, p guide)",
-          handler: (inspectorCtx) => {
-            void openFleetInspector(inspectorCtx, {
-              cancel: (runId) => {
-                const cancelled = cancelDelegateRun(runId);
-                inspectorCtx.ui.notify(cancelled ? `[ACP] cancelled ${runId}` : `[ACP] ${runId} is no longer running`);
-              },
-              guide: (runId) => {
-                void (async () => {
-                  const guidance = await inspectorCtx.ui.editor(`Guide delegate ${runId} (interrupt + resume)`, "");
-                  if (!guidance?.trim()) return;
-                  inspectorCtx.ui.notify(`[ACP] interrupting ${runId}; starting resumed delegate with guidance…`);
-                  const result = await guideDelegate(pi, inspectorCtx, runId, guidance);
-                  inspectorCtx.ui.notify(`[ACP] ${result}`);
-                })().catch((err) => {
-                  inspectorCtx.ui.notify(`[ACP] guide failed: ${err instanceof Error ? err.message : String(err)}`);
-                });
-              },
-            });
-          },
+          description: "Inspect acp_delegate runs (live list + transcript)",
+          handler: (ctx) => { void openFleetInspector(ctx); },
         });
       }
     }
@@ -335,15 +338,10 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     // Bind the TUI status widget for async delegates. The widget reads the
     // in-memory runs Map (via runningRunsSnapshot) and renders a live list of
     // running delegates below the editor. Only the interactive TUI has a UI;
-    // rpc/json/print have hasUI=false and the call is a no-op. `pi` +
-    // fleetRunsSnapshot also broadcast full run state over pi.events for host dock.
-    delegateStatusWidget.setContext(ctx, runningRunsSnapshot, pi, fleetRunsSnapshot, delegatePolicy.fleetShortcut);
+    // rpc/json/print have hasUI=false and the call is a no-op.
+    delegateStatusWidget.setContext(ctx, runningRunsSnapshot, delegatePolicy.fleetShortcut);
   });
-  pi.on("session_shutdown", async (event, ctx) => {
-    // Delegates are detached so they can outlive a tool call, but they must
-    // not outlive the Pi host itself. Keep them across in-process session
-    // replacement (/new, /resume, /fork, /reload); stop them on final quit.
-    if (event?.reason === "quit") await shutdownDelegates();
+  pi.on("session_shutdown", (_event, ctx) => {
     const sid = ctx.sessionManager.getSessionId();
     runtime.clearDeadCompress(sid);
     runtime.dropTokenScale(sid);
@@ -351,6 +349,8 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     runtime.clearCompressRetryTracking(sid);
     runtime.dropHostUsageSamples(sid);
     runtime.dropSizeDivergence(sid);
+    runtime.dropTerminalEscape(sid);
+    runtime.dropTruncationSkipped(sid);
     delegateStatusWidget.dispose();
     closeLogStream();
   });
@@ -363,6 +363,32 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
 // degeneration (different count/char) re-notifies. Per-process, like the
 // other one-shot warn flags (ompWarned, proxyStandDownWarned).
 let lastDegNoticeKey: string | null = null;
+
+// Opt-in wire-level strip of historical image payloads (issue #321, kernel
+// #215). pi serializes the provider request body from the (already transformed)
+// messages and fires before_provider_request with the RAW payload right before
+// the HTTP call — the same wire point the billion-context proxy strips at. We
+// only touch the body when the policy is enabled AND something was actually
+// removed; returning undefined keeps pi's payload reference untouched.
+function wireBeforeProviderRequest(pi: ExtensionAPI, runtime: AcpRuntime, standDownIfProxied: (ctx: ExtensionContext) => boolean): void {
+  pi.on("before_provider_request", async (event, ctx) => {
+    if (runtime.refused) return;
+    if (standDownIfProxied(ctx)) return;
+    const settings = runtime.stripImagesFor(ctx);
+    if (!settings.enabled) return;
+    const outcome = applyStripImages(event.payload, (ctx.model as { api?: string } | undefined)?.api, settings);
+    if (outcome.removed > 0) {
+      logInfo("strip-images", {
+        sid: ctx.sessionManager.getSessionId(),
+        event: "stripped",
+        removed: outcome.removed,
+        keepRecent: settings.keepRecent,
+      });
+      return outcome.body;
+    }
+    return;
+  });
+}
 
 // The core integration: Pi's `context` event fires before every LLM call with the
 // messages about to be sent. We run acp-kernel's processTurn (prune + ref-tag +
@@ -514,6 +540,35 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
       await runtime.save(turn.state, ctx);
 
+      // [#464] Surface the kernel's end-game observability signals: they fire
+      // every stuck turn inside the kernel, but before this were invisible —
+      // exactly when compression can no longer save the session is the moment
+      // the user must hear about. One log + one UI notice per episode.
+      if (turn.terminalEscape) {
+        if (runtime.noteTerminalEscape(sid, true)) {
+          logWarn("overflow", {
+            sid,
+            event: "terminal-escape",
+            stuckEvents: turn.terminalEscape.stuckEvents,
+            usage: turn.terminalEscape.usage,
+            tokens: turn.terminalEscape.tokenCount,
+            limit: turn.terminalEscape.modelContextLimit,
+          });
+          if (ctx.hasUI) {
+            ctx.ui.notify(`[ACP] ⚠️ ${turn.terminalEscape.message}`, "warning");
+          }
+        }
+      } else {
+        runtime.noteTerminalEscape(sid, false);
+      }
+      if (turn.truncationSkipped) {
+        if (runtime.noteTruncationSkipped(sid, true)) {
+          logWarn("overflow", { sid, event: "truncation-skipped", detail: turn.truncationSkipped });
+        }
+      } else {
+        runtime.noteTruncationSkipped(sid, false);
+      }
+
       logInfo("turn", {
         sid,
         model: (ctx.model as { id?: string } | undefined)?.id ?? null,
@@ -608,9 +663,10 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     const turnPolicy = resolveHostSession(runtime.adapter);
     const turnKey = lastTurnBoundaryId(entries, turnPolicy) ?? sid;
     // #453: the retry breaker keys off PERSISTED boundaries only — under fork
-    // hosts the merged `entries` carry volatile live-N ids for the not-yet-
-    // persisted tail, so `turnKey` churns between context fires and would
-    // reset failCount mid-episode (cap never latches, emergency-inject loops).
+    // hosts the merged `entries` carry content-addressed live-* ids (#459) for
+    // the not-yet-persisted tail, which can still churn when the host's view
+    // of a message drifts between context fires and would reset failCount
+    // mid-episode (cap never latches, emergency-inject loops).
     const retryTurnKey = retryBreakerKey(ctx.sessionManager, turnPolicy) ?? sid;
 
     // Compress-outcome tracking feeds ONLY the nudge circuit breaker below:
@@ -726,6 +782,17 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     if (liveTail && liveTail.length > 0) {
       rebuilt.push(...liveTail);
       logInfo("live-only-tail", { sid, event: "appended", tail: liveTail.length, outMsgs: rebuilt.length });
+    }
+
+    // #477 pi 0.86 carries the active toolset on the session system message
+    // (toolsAdded); provider adapters derive request `tools` from it. The
+    // rebuild sources messages from persisted entries, which never include the
+    // system message, so requests went out toolless. Carry the input's system
+    // message(s) back onto the rebuild; strict no-op on hosts without one.
+    const withHostSystem = carryHostSystemMessages(rebuilt, event.messages);
+    if (withHostSystem !== rebuilt) {
+      rebuilt = withHostSystem;
+      logInfo("system-passthrough", { sid, event: "carried", systems: event.messages.filter((m) => (m as { role?: unknown }).role === "system").length, outMsgs: rebuilt.length });
     }
 
     // Always return the transformed array: every message needs its [mNNNNN] ref

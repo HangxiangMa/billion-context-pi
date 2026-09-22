@@ -25,12 +25,6 @@ interface TuiLike {
   terminal: { rows: number };
 }
 
-/** Keybindings supplied by `ctx.ui.custom`. Use these for standard actions so
- * user remaps keep working inside the inspector and do not steal editor keys. */
-interface InspectorKeybindings {
-  matches(data: string, binding: string): boolean;
-}
-
 function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
 }
@@ -360,11 +354,6 @@ export function buildSnapshotText(runs: FleetRunView[], now: number): string {
   return parts.join("\n");
 }
 
-export interface FleetInspectorActions {
-  cancel?(runId: string): void;
-  guide?(runId: string): void;
-}
-
 class FleetInspectorComponent implements Component {
   private mode: "list" | "transcript" = "list";
   private rows: ListRow[] = [];
@@ -386,8 +375,6 @@ class FleetInspectorComponent implements Component {
     private doneCb: () => void,
     private snapshotFn: () => FleetRunView[],
     private refreshMs: number,
-    private keybindings: InspectorKeybindings,
-    private actions: FleetInspectorActions = {},
   ) {}
 
   start(): void {
@@ -476,8 +463,7 @@ class FleetInspectorComponent implements Component {
   }
 
   handleInput(data: string): void {
-    const cancel = this.keybindings.matches(data, "tui.select.cancel") || matchesKey(data, "q");
-    if (cancel) {
+    if (matchesKey(data, Key.escape) || matchesKey(data, "q")) {
       if (this.mode === "transcript") {
         this.mode = "list";
         this.follow = true;
@@ -489,20 +475,15 @@ class FleetInspectorComponent implements Component {
       return;
     }
     if (this.mode === "list") {
-      if (this.keybindings.matches(data, "tui.select.up") || matchesKey(data, "k")) this.move(-1);
-      else if (this.keybindings.matches(data, "tui.select.down") || matchesKey(data, "j")) this.move(1);
-      else if (this.keybindings.matches(data, "tui.select.confirm") || matchesKey(data, "x")) this.openTranscript();
-      // c/p are inspector-local actions, not global shortcuts. They are only
-      // consumed while this overlay owns input, so they cannot trigger an
-      // unrelated extension command in the parent editor.
-      else if (matchesKey(data, "c")) this.cancelSelected();
-      else if (matchesKey(data, "p")) this.guideSelected();
+      if (matchesKey(data, Key.up) || matchesKey(data, "k")) this.move(-1);
+      else if (matchesKey(data, Key.down) || matchesKey(data, "j")) this.move(1);
+      else if (matchesKey(data, Key.enter) || matchesKey(data, "x")) this.openTranscript();
     } else {
-      if (this.keybindings.matches(data, "tui.select.up") || matchesKey(data, "k")) this.scrollTranscript(-1);
-      else if (this.keybindings.matches(data, "tui.select.down") || matchesKey(data, "j")) this.scrollTranscript(1);
-      else if (matchesKey(data, Key.left) || matchesKey(data, Key.pageUp) || this.keybindings.matches(data, "tui.select.pageUp")) this.scrollTranscript(-this.pageSize());
-      else if (matchesKey(data, Key.right) || matchesKey(data, Key.pageDown) || this.keybindings.matches(data, "tui.select.pageDown")) this.scrollTranscript(this.pageSize());
-      else if (this.keybindings.matches(data, "tui.select.confirm")) {
+      if (matchesKey(data, Key.up) || matchesKey(data, "k")) this.scrollTranscript(-1);
+      else if (matchesKey(data, Key.down) || matchesKey(data, "j")) this.scrollTranscript(1);
+      else if (matchesKey(data, Key.left) || matchesKey(data, Key.pageUp)) this.scrollTranscript(-this.pageSize());
+      else if (matchesKey(data, Key.right) || matchesKey(data, Key.pageDown)) this.scrollTranscript(this.pageSize());
+      else if (matchesKey(data, Key.enter)) {
         this.mode = "list";
         this.tui.requestRender();
       }
@@ -534,20 +515,6 @@ class FleetInspectorComponent implements Component {
     this.follow = true;
     this.viewTop = 0;
     this.tick();
-  }
-
-  private cancelSelected(): void {
-    const run = this.rows[this.selIdx]?.run;
-    if (!run || !this.actions.cancel) return;
-    this.actions.cancel(run.runId);
-    this.tui.requestRender();
-  }
-
-  private guideSelected(): void {
-    const run = this.rows[this.selIdx]?.run;
-    if (!run || !this.actions.guide) return;
-    this.close();
-    this.actions.guide(run.runId);
   }
 
   private close(): void {
@@ -591,7 +558,7 @@ class FleetInspectorComponent implements Component {
       else if (this.selIdx >= top + midH) top = this.selIdx - midH + 1;
       top = Math.max(0, top);
       middle = middle.slice(top, top + midH);
-      footer = this.theme.fg("dim", "↑↓ select · enter inspect · c cancel · p interrupt+guide · esc close");
+      footer = this.theme.fg("dim", "↑↓ select · enter inspect · esc close");
     } else {
       header = this.transcriptHeader(sel, innerW);
       middle = this.transcriptLines;
@@ -607,15 +574,15 @@ class FleetInspectorComponent implements Component {
 
 /** Open the live fleet inspector: bordered TUI overlay in interactive mode,
  *  plain-text snapshot notification elsewhere. Resolves when the user closes it. */
-export async function openFleetInspector(ctx: ExtensionContext, actions: FleetInspectorActions = {}): Promise<void> {
+export async function openFleetInspector(ctx: ExtensionContext): Promise<void> {
   if (ctx.mode !== "tui") {
     const text = buildSnapshotText(fleetRunsSnapshot(), Date.now());
     if (ctx.hasUI) ctx.ui.notify(text);
     else console.log(text);
     return;
   }
-  await ctx.ui.custom(async (tui, theme, keybindings, done) => {
-    const comp = new FleetInspectorComponent(tui, theme, () => done(undefined), fleetRunsSnapshot, REFRESH_MS, keybindings, actions);
+  await ctx.ui.custom(async (tui, theme, _keybindings, done) => {
+    const comp = new FleetInspectorComponent(tui, theme, () => done(undefined), fleetRunsSnapshot, REFRESH_MS);
     comp.start();
     return comp;
   }, {

@@ -84,13 +84,11 @@ test("poke resets the idle timer (continuous output never triggers)", async () =
   h.watchdog.dispose();
 });
 
-test("EOF grace terminates and escalates when stdout ended but the child lives", async () => {
-  const h = setup({ eofGraceMs: 30, killGraceMs: 30 });
+test("EOF grace force-finalizes when stdout ended but the child lives", async () => {
+  const h = setup({ eofGraceMs: 30 });
   h.stdout.emit("end");
-  await sleep(100);
+  await sleep(60);
   assert.equal(h.eofGraceCount, 1, "onEofGrace fired once");
-  assert.deepEqual(h.kills, ["SIGTERM", "SIGKILL"], "EOF uses bounded termination");
-  assert.equal(h.reasons[0], "output ended but process did not exit");
   h.watchdog.dispose();
 });
 

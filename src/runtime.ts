@@ -1,4 +1,5 @@
 import type { ExtensionContext, SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import {
   createCore,
@@ -18,7 +19,7 @@ import { loadUserConfig, applyUserConfig } from "./user-config.js";
 import { sanitizeSurfaceConfig } from "./surface.js";
 import { ThrottleEpisode } from "./throttle-retry.js";
 import { logInfo, logWarn, setDebugEnabled } from "./log.js";
-import { findUniqueLongestRun, type MatchRange } from "./sequence-match.js";
+import { findPositionalPrefixRun, findUniqueLongestRun, type MatchRange } from "./sequence-match.js";
 import { OverflowEpisode } from "./overflow-selfheal.js";
 import { lastTurnBoundaryId, type TurnBoundaryPolicy } from "./turn-boundary.js";
 // pi exposes `sessionManager.buildContextEntries()`; omp (oh-my-pi) only has
@@ -44,12 +45,12 @@ export function isPiHost(sm: ExtensionContext["sessionManager"]): boolean {
 }
 
 /** #453: key for the compress-retry circuit breaker, derived from PERSISTED
- *  entries only. On fork hosts the live-merged tail carries volatile live-N
- *  ids that renumber between context fires (the not-yet-persisted current
- *  user message), so a breaker keyed on the merged view resets failCount
- *  mid-episode and never latches (#452 log: cap → inject loop). Persisted
- *  entry ids are immutable; this key changes only when a genuine new user
- *  message reaches the session log. pi-native hosts see no change. */
+ *  entries only. Live-merged tail ids (content-addressed since #459) can still
+ *  churn when the host's view of a not-yet-persisted message drifts, so a
+ *  breaker keyed on the merged view could reset failCount mid-episode (#452
+ *  log: cap → inject loop). Persisted entry ids are immutable; this key
+ *  changes only when a genuine new user message reaches the session log.
+ *  pi-native hosts see no change. */
 export function retryBreakerKey(sm: ExtensionContext["sessionManager"], policy?: TurnBoundaryPolicy): string | undefined {
   return lastTurnBoundaryId(readContextEntries(sm), policy);
 }
@@ -126,6 +127,9 @@ export interface AcpRuntime {
    *  (three-level merge + defaults). Feeds the request-time pass in the
    *  context transform. */
   reasoningDropFor(ctx: ExtensionContext): Required<CompressReasoningConfig>;
+  /** Effective historical-image strip policy for the active model (issue #321).
+   *  Host-side policy — deliberately NOT part of the kernel Config object. */
+  stripImagesFor(ctx: ExtensionContext): { enabled: boolean; keepRecent: number };
   /** Re-read ~/.<dir>/acp.json + <cwd>/<dir>/acp.json and re-derive the adapter
    *  config when the contents change. Cheap no-op when unchanged. Called at
    *  session_start and on every context event so config edits apply live. */
@@ -174,21 +178,44 @@ export interface AcpRuntime {
   noteSizeDivergence(sid: string, divergent: boolean): boolean;
   /** Drop a session's size-divergence episode (session_shutdown). */
   dropSizeDivergence(sid: string): void;
+  /** Track the kernel's terminal-escape signal (issue #464): returns true
+   *  exactly once per episode — the first consecutive stuck fire — so the
+   *  caller logs/notifies once instead of every turn. A non-escaping turn
+   *  ends the episode. */
+  noteTerminalEscape(sid: string, active: boolean): boolean;
+  /** Drop a session's terminal-escape episode (session_shutdown). */
+  dropTerminalEscape(sid: string): void;
+  /** Track the kernel's truncation-skipped signal (issue #464): returns true
+   *  exactly once per episode for low-frequency diagnostics. A turn that
+   *  truncates (or skips nothing) ends the episode. */
+  noteTruncationSkipped(sid: string, active: boolean): boolean;
+  /** Drop a session's truncation-skipped episode (session_shutdown). */
+  dropTruncationSkipped(sid: string): void;
 }
 // omp fires the context event before the current user message is persisted to
 // the session branch, so merge event.messages (exact messages about to be sent,
 // including the not-yet-persisted tail) with the persisted branch: matching
-// messages keep their stable entry id, unmatched tail messages get `live-N`
-// ids until persisted.
+// messages keep their stable entry id, unmatched tail messages get
+// content-addressed `live-<hash>` ids (#459) until persisted.
 function mergeLiveEntries(entries: SessionEntry[], live: AgentMessage[], state: CompressionState, origins: LiveRefOrigin[]): SessionEntry[] {
   const persisted = entries.filter((e): e is SessionMessageEntry => e.type === "message");
   const liveIdentities = live.map(messageIdentity);
   const persistedIdentities = persisted.map((entry) => messageIdentity(entry.message));
-  const persistedRange = findUniqueLongestRun<MatchKey>(persistedIdentities, normalizePersistedMatchKeys(persisted, persistedIdentities, live, liveIdentities));
+  const normalizedKeys = normalizePersistedMatchKeys(persisted, persistedIdentities, live, liveIdentities);
+  // #459: the unique matcher gives up on duplicate-heavy views (ambiguous best
+  // run), which previously stranded every live message and renumbered its
+  // volatile live-N id each fire; the tail-anchored prefix run recovers the
+  // alignment deterministically under append-only growth.
+  const persistedRange = findUniqueLongestRun<MatchKey>(persistedIdentities, normalizedKeys) ?? findPositionalPrefixRun<MatchKey>(persistedIdentities, normalizedKeys);
   const originRange = findUniqueLongestRun(origins.map((origin) => origin.identity), liveIdentities);
+  // #459: occurrence rank of each identity across (persisted + unmatched live
+  // prefix). When a message gets persisted it moves from the live count into
+  // the persisted count, so every still-live duplicate keeps the same rank —
+  // its id stays put across fires.
+  const identityRanks = new Map<string, number>();
+  for (const identity of persistedIdentities) identityRanks.set(identity, (identityRanks.get(identity) ?? 0) + 1);
   const out: SessionEntry[] = [];
   const nextOrigins: LiveRefOrigin[] = [];
-  const usedIds = new Set<string>();
   for (let i = 0; i < live.length; i++) {
     const msg = live[i]!;
     const entry = valueInRange(persisted, persistedRange, i);
@@ -199,10 +226,12 @@ function mergeLiveEntries(entries: SessionEntry[], live: AgentMessage[], state: 
       out.push(entry);
       continue;
     }
-    const id = origin?.rawId ?? nextLiveId(state, usedIds, i);
-    usedIds.add(id);
+    const identity = liveIdentities[i]!;
+    const rank = identityRanks.get(identity) ?? 0;
+    identityRanks.set(identity, rank + 1);
+    const id = origin?.rawId ?? stableLiveId(identity, rank);
     out.push({ type: "message", id, parentId: null, timestamp: String(msg.timestamp ?? Date.now()), message: msg });
-    nextOrigins.push({ rawId: id, identity: liveIdentities[i]! });
+    nextOrigins.push({ rawId: id, identity });
   }
   origins.splice(0, origins.length, ...nextOrigins);
   const unmatched = live.length - (persistedRange?.length ?? 0);
@@ -210,12 +239,12 @@ function mergeLiveEntries(entries: SessionEntry[], live: AgentMessage[], state: 
   return out;
 }
 
-
-function nextLiveId(state: CompressionState, used: Set<string>, index: number): string {
-  let id = `live-${index}`;
-  let suffix = index;
-  while (used.has(id) || state.messageRefs.byRaw[id] !== undefined) id = `live-${++suffix}`;
-  return id;
+// #459: deterministic id for an unmatched live message — sha256 over its
+// content identity plus occurrence rank, so the same logical message gets the
+// same id on every context fire (and after a state rebuild) even when the
+// unique matcher cannot align it.
+function stableLiveId(identity: string, rank: number): string {
+  return `live-${createHash("sha256").update(`${identity}\u0000${rank}`).digest("hex").slice(0, 16)}`;
 }
 
 function migrateTaggedRef(state: CompressionState, message: AgentMessage, stableId: string): void {
@@ -442,6 +471,37 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     sizeDivergenceStreaks.delete(sid);
   }
 
+  // [#464] Kernel observability signals (acp-kernel#302): terminalEscape is
+  // the "compression cannot save this session" last signal, truncationSkipped
+  // explains a silent emergency-truncate no-op. One episode flag each — the
+  // kernel fires them every stuck turn, users must see them once.
+  const terminalEscapeEpisodes = new Set<string>();
+  function noteTerminalEscape(sid: string, active: boolean): boolean {
+    if (!active) {
+      terminalEscapeEpisodes.delete(sid);
+      return false;
+    }
+    if (terminalEscapeEpisodes.has(sid)) return false;
+    terminalEscapeEpisodes.add(sid);
+    return true;
+  }
+  function dropTerminalEscape(sid: string): void {
+    terminalEscapeEpisodes.delete(sid);
+  }
+  const truncationSkipEpisodes = new Set<string>();
+  function noteTruncationSkipped(sid: string, active: boolean): boolean {
+    if (!active) {
+      truncationSkipEpisodes.delete(sid);
+      return false;
+    }
+    if (truncationSkipEpisodes.has(sid)) return false;
+    truncationSkipEpisodes.add(sid);
+    return true;
+  }
+  function dropTruncationSkipped(sid: string): void {
+    truncationSkipEpisodes.delete(sid);
+  }
+
   // [#361] session ids already logged for the strict-echo auto-disable, so the
   // info event fires once per session rather than once per LLM call.
   const strictEchoLogged = new Set<string>();
@@ -507,13 +567,10 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   }
 
   function liveContextLimit(ctx: ExtensionContext): number {
-    // Model metadata follows the active model across a model switch. The
-    // usage snapshot can retain the previous provider window until the next
-    // request, which otherwise makes compaction thresholds use a stale limit.
-    const m = ctx.model as { contextWindow?: number } | undefined;
-    if (m?.contextWindow && m.contextWindow > 0) return m.contextWindow;
     const usage = ctx.getContextUsage?.();
-    return usage?.contextWindow && usage.contextWindow > 0 ? usage.contextWindow : 0;
+    if (usage?.contextWindow && usage.contextWindow > 0) return usage.contextWindow;
+    const m = ctx.model as { contextWindow?: number } | undefined;
+    return m?.contextWindow ?? 0;
   }
 
   function configFor(ctx: ExtensionContext): Config {
@@ -538,6 +595,14 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     return gated;
   }
 
+  function stripImagesFor(ctx: ExtensionContext): { enabled: boolean; keepRecent: number } {
+    const m = ctx.model as { provider?: string; id?: string } | undefined;
+    const c = resolveCompress(adapterRef.compress, m?.provider, m?.id);
+    const raw = Number(c.stripImagesKeepRecent);
+    const keepRecent = Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 5;
+    return { enabled: c.stripImages === true, keepRecent };
+  }
+
   async function reloadConfig(cwd: string): Promise<void> {
     let user;
     try {
@@ -560,10 +625,23 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     }
   }
 
+  // #459: tools (compress/decompress/status/search) run stateFor WITHOUT the
+  // context event's live tail, while the nudge that told the model which refs
+  // to cite was rendered WITH it — on fork hosts getBranch() lags the live
+  // tail, so every model-built range touching the tail died with "does not
+  // exist" (#452 loop). Cache each session's last context-fire live tail and
+  // replay it on the tool path so both views agree. The map is process-local:
+  // a resumed session starts with an empty cache and the first context fire
+  // repopulates it before any tool can run.
+  const lastLiveBySession = new Map<string, AgentMessage[]>();
+
   async function stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[]) {
     const sm = ctx.sessionManager;
     const sessionFile = sm.getSessionFile() ?? undefined;
     const sessionId = sm.getSessionId();
+    const piHost = isPiHost(sm);
+    if (!piHost && liveMessages && liveMessages.length > 0) lastLiveBySession.set(sessionId, [...liveMessages]);
+    const live = piHost ? undefined : (liveMessages ?? lastLiveBySession.get(sessionId));
     let state = await store.load(sessionFile, sessionId);
     const entries = readContextEntries(sm);
     // Issue #299 (ranxianglei/billion-context-pi#299): pi's importFromJsonl
@@ -595,15 +673,19 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     // buildContextEntries() is always current. Merge event.messages (the exact
     // messages about to be sent, including the not-yet-persisted tail) with the
     // persisted branch records on the omp path only.
-    if (!isPiHost(sm) && liveMessages && liveMessages.length > 0) {
+    if (!piHost && live && live.length > 0) {
       const origins = store.getLiveRefOrigins(sessionFile, sessionId);
-      const merged = mergeLiveEntries(entries, liveMessages, state, origins);
+      const merged = mergeLiveEntries(entries, live, state, origins);
       store.setLiveRefOrigins(sessionFile, sessionId, origins);
       const coreMessages = entriesToCoreMessages(merged);
+      // #459: enforce byRaw ⊆ view-ids ∪ block-ids on the merged view too —
+      // without it, stale live-* refs from a shrunken/rewound host view linger
+      // in state and get cited into compress ranges (#452 cross-generation refs).
+      pruneOrphanRefs(state, coreMessages);
       return { state, coreMessages, entries: merged };
     }
     const coreMessages = entriesToCoreMessages(entries);
-    if (liveMessages === undefined) pruneOrphanRefs(state, coreMessages);
+    if (live === undefined) pruneOrphanRefs(state, coreMessages);
     return { state, coreMessages, entries };
   }
 
@@ -645,4 +727,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   let refused = false;
   let refusalMessage: string | null = null;
   let delegateStoodDown = false;
-  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale, noteHostUsage, dropHostUsageSamples, noteSizeDivergence, dropSizeDivergence };}
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get refusalMessage() { return refusalMessage; }, set refusalMessage(v: string | null) { refusalMessage = v; }, get delegateStoodDown() { return delegateStoodDown; }, set delegateStoodDown(v: boolean) { delegateStoodDown = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown, nudgeShownFor, nudgeShownTokensFor, clearNudgeTracking, clearNudgeTokenStamps, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reasoningDropFor, reloadConfig, stateFor, save, deriveChildState: deriveChild, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop , noteTokenScale, dropTokenScale, noteHostUsage, dropHostUsageSamples, noteSizeDivergence, dropSizeDivergence, noteTerminalEscape, dropTerminalEscape, noteTruncationSkipped, dropTruncationSkipped, stripImagesFor };}

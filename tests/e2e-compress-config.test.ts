@@ -13,18 +13,8 @@ import { loadUserConfig } from "../src/user-config.js";
 // configFor, the exact functions wired at session_start / context events), as opposed
 // to the resolveCompress unit tests in config.test.ts.
 
-function ctxFor(
-    provider: string | undefined,
-    id: string | undefined,
-    contextWindow: number,
-    usageContextWindow?: number,
-): ExtensionContext {
-    return {
-        model: { provider, id, contextWindow },
-        ...(usageContextWindow === undefined
-            ? {}
-            : { getContextUsage: () => ({ tokens: 0, percent: 0, contextWindow: usageContextWindow }) }),
-    } as unknown as ExtensionContext;
+function ctxFor(provider: string | undefined, id: string | undefined, contextWindow: number): ExtensionContext {
+    return { model: { provider, id, contextWindow } } as unknown as ExtensionContext;
 }
 
 const ACP_JSON = {
@@ -80,12 +70,6 @@ test("e2e compress config: acp.json provider/model overrides take effect through
         assert.equal(openai.nudge.emergencyThresholdPct, 0.92);
         assert.equal(openai.modelContextLimit, 128_000, "live model context window passed through");
     });
-});
-
-test("e2e compaction gating: active Sonnet 5 model window wins over stale usage metadata", () => {
-    const runtime = createRuntime({});
-    const sonnet5 = runtime.configFor(ctxFor("breeze", "claude-sonnet-5", 1_000_000, 200_000));
-    assert.equal(sonnet5.modelContextLimit, 1_000_000, "active Sonnet 5 window must drive compaction thresholds");
 });
 
 test("e2e compress config: a single runtime resolves differently per model (proves per-turn, not static)", async () => {

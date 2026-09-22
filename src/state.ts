@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { createInitialState, type CompressionState } from "acp-kernel";
 import { logError, logInfo, logWarn } from "./log.js";
+import { SIDECAR_SCHEMA_VERSION, sidecarProducer } from "./contract.js";
 
 const STATE_SUFFIX = ".acp.json";
 
@@ -72,7 +73,13 @@ export class SessionStateStore {
     if (file) {
       try {
         const raw = await fs.readFile(file, "utf8");
-        const parsed = JSON.parse(raw) as CompressionState & { liveRefOrigins?: unknown; derivedFrom?: unknown; activePack?: unknown };
+        const parsed = JSON.parse(raw) as CompressionState & { liveRefOrigins?: unknown; derivedFrom?: unknown; activePack?: unknown; schemaVersion?: unknown; producer?: unknown };
+        // #368: an unknown NEWER schema means a future writer touched the
+        // file. Best-effort read (same producer family), one warning — but we
+        // never rewrite structures we do not understand beyond the v1 fields.
+        if (typeof parsed.schemaVersion === "number" && parsed.schemaVersion > SIDECAR_SCHEMA_VERSION) {
+          logWarn("state", { event: "schema-newer", file, schemaVersion: parsed.schemaVersion, known: SIDECAR_SCHEMA_VERSION });
+        }
         if (parsed && Array.isArray(parsed.blocks)) {
           state = mergeInitialState(parsed);
           liveRefOrigins = parseLiveRefOrigins(parsed.liveRefOrigins);
@@ -129,7 +136,13 @@ export class SessionStateStore {
     });
     const tmp = path.join(dir, `.acp-tmp-${path.basename(file)}`);
     try {
-      const payload: Record<string, unknown> = { ...state, liveRefOrigins };
+      // #368 contract headers last: state fields can never clobber them.
+      const payload: Record<string, unknown> = {
+        ...state,
+        liveRefOrigins,
+        schemaVersion: SIDECAR_SCHEMA_VERSION,
+        producer: sidecarProducer(),
+      };
       if (derivedFrom) payload.derivedFrom = derivedFrom;
       if (activePack) payload.activePack = activePack;
       await fs.writeFile(tmp, JSON.stringify(payload), "utf8");
@@ -202,9 +215,11 @@ function parseDerivedFrom(value: unknown): DerivedFrom | null {
 /** #364: derive an INLINE child session's compression state from its parent's
  *  (same-process sub-sessions, e.g. Prime RLM). Inherits exactly what makes
  *  inherited blocks usable — blocks (deep-copied: they carry mutable fields),
- *  message refs, the per-message token snapshot, and the id counters so new
- *  child blocks cannot collide with inherited ids — and resets every rhythm
- *  ledger (nudge cadence baseline, stats counters, absorb records) so the
+ *  message refs, the per-message token snapshot, the id counters so new
+ *  child blocks cannot collide with inherited ids, and the persistent
+ *  acp_rule reminders (kernel cloneState precedent: never silently drop
+ *  model-set rules) — and resets every rhythm ledger (nudge cadence
+ *  baseline, stats counters, absorb records) so the
  *  child starts its own clock. Separate-process pi-native delegates must NOT
  *  use this: their session files carry a parentSession header that already
  *  inherits the parent state verbatim. */
@@ -217,6 +232,8 @@ export function deriveChildState(parent: CompressionState): CompressionState {
     nudge: fresh.nudge,
     stats: fresh.stats,
     absorbed: [],
+    rules: structuredClone(parent.rules ?? []),
+    nextRuleId: parent.nextRuleId ?? fresh.nextRuleId,
     nextBlockId: parent.nextBlockId,
     nextRunId: parent.nextRunId,
   };
@@ -239,6 +256,10 @@ function mergeInitialState(parsed: CompressionState): CompressionState {
     tokenSnapshot: parsed.tokenSnapshot ?? fresh.tokenSnapshot,
     nudge: { ...fresh.nudge, ...(parsed.nudge ?? {}) },
     stats: { ...fresh.stats, ...(parsed.stats ?? {}) },
+    absorbed: parsed.absorbed ?? fresh.absorbed,
+    rules: parsed.rules ?? fresh.rules,
+    nextRuleId: parsed.nextRuleId ?? fresh.nextRuleId,
+    ...(parsed.terminalStreak !== undefined ? { terminalStreak: parsed.terminalStreak } : {}),
     nextBlockId: parsed.nextBlockId ?? fresh.nextBlockId,
     nextRunId: parsed.nextRunId ?? fresh.nextRunId,
   };

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createAcpExtension } from "../src/index.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
@@ -62,7 +62,13 @@ function userMsg(id: string, text: string) {
   return { type: "message", id, parentId: null, timestamp: "", message: { role: "user", content: text, timestamp: Date.now() } };
 }
 
- test("factory registers the compress tool and 8 flat commands", () => {
+// #459: live-tail ids are content-addressed (`live-<hash>`), so tests resolve
+// them dynamically instead of assuming positional names.
+function liveRawKeys(state: { messageRefs?: { byRaw?: Record<string, string> } }): string[] {
+  return Object.keys(state.messageRefs?.byRaw ?? {}).filter((k) => k.startsWith("live-"));
+}
+
+  test("factory registers the compress tool and 8 flat commands", () => {
   const { api, handlers } = captureApi();
   createAcpExtension()(api as any);
 
@@ -78,75 +84,6 @@ test("session_before_compact cancels Pi's auto-compaction", () => {
   const { api, handlers } = captureApi();
   createAcpExtension()(api as any);
   const result = handlers.get("session_before_compact")![0]!({}, {});
-  assert.deepEqual(result, { cancel: true });
-});
-
-test("Breeze Sonnet 5 at 200K stays on ACP compression", () => {
-  const { api, handlers } = captureApi();
-  createAcpExtension()(api as any);
-  const result = handlers.get("session_before_compact")![0]({}, {
-    model: { provider: "breeze", id: "claude-sonnet-5", contextWindow: 200_000 },
-  });
-  assert.deepEqual(result, { cancel: true });
-});
-
-test("Breeze-1M Sonnet 5 keeps Pi native auto-compaction", () => {
-  const { api, handlers } = captureApi();
-  createAcpExtension()(api as any);
-  const result = handlers.get("session_before_compact")![0]({}, {
-    model: { provider: "breeze-1m", id: "claude-sonnet-5", contextWindow: 1_000_000 },
-    getContextUsage: () => ({ contextWindow: 200_000 }),
-  });
-  assert.equal(result, undefined, "active 1M model must not be blocked by stale 200K usage");
-});
-
-test("Sonnet 5 gate uses usage window when active model window is unavailable", () => {
-  const { api, handlers } = captureApi();
-  createAcpExtension()(api as any);
-  const handler = handlers.get("session_before_compact")![0]!;
-  assert.equal(handler({}, {
-    model: { provider: "breeze-1m", id: "claude-sonnet-5" },
-    getContextUsage: () => ({ contextWindow: 1_000_000 }),
-  }), undefined);
-  assert.deepEqual(handler({}, {
-    model: { provider: "breeze-1m", id: "claude-sonnet-5", contextWindow: 999_999 },
-    getContextUsage: () => ({ contextWindow: 1_000_000 }),
-  }), { cancel: true }, "positive active model window wins over usage metadata");
-});
-
-test("all non-Breeze models remain ACP-owned", () => {
-  const { api, handlers } = captureApi();
-  createAcpExtension()(api as any);
-  const handler = handlers.get("session_before_compact")![0]!;
-  for (const model of [
-    { provider: "qgenie-openai", id: "gpt-5.6-luna", contextWindow: 200_000 },
-    { provider: "anthropic", id: "claude-sonnet-5", contextWindow: 1_000_000 },
-    { provider: "openai", id: "gpt-5", contextWindow: 1_000_000 },
-  ]) {
-    assert.deepEqual(handler({}, { model }), { cancel: true }, `${model.provider}/${model.id} stays ACP-owned`);
-  }
-});
-
-test("all Breeze Claude model IDs use context-window gating", () => {
-  const { api, handlers } = captureApi();
-  createAcpExtension()(api as any);
-  const handler = handlers.get("session_before_compact")![0]!;
-  for (const id of ["claude-opus-4", "claude-haiku-4", "claude-3-7-sonnet"]) {
-    assert.deepEqual(handler({}, {
-      model: { provider: "breeze", id, contextWindow: 200_000 },
-    }), { cancel: true }, `${id} uses ACP compression on 200K Breeze`);
-    assert.equal(handler({}, {
-      model: { provider: "breeze-1m", id, contextWindow: 1_000_000 },
-    }), undefined, `${id} keeps native compaction on 1M Breeze`);
-  }
-});
-
-test("full Claude Sonnet 5 spelling uses same ACP gate", () => {
-  const { api, handlers } = captureApi();
-  createAcpExtension()(api as any);
-  const result = handlers.get("session_before_compact")![0]({}, {
-    model: { provider: "breeze", id: "claude-sonnet-5", contextWindow: 200_000 },
-  });
   assert.deepEqual(result, { cancel: true });
 });
 
@@ -289,7 +226,7 @@ test("omp migrates tagged live refs to stable entry ids", async () => {
   await handlers.get("context")![0]!({ type: "context", messages: first.messages }, ctx);
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw.e1, targetRef);
-  assert.equal(saved.messageRefs.byRaw["live-0"], undefined);
+  assert.equal(liveRawKeys(saved).length, 0);
 });
 
 test("omp matches a persisted context suffix before assigning live refs", async () => {
@@ -304,7 +241,7 @@ test("omp matches a persisted context suffix before assigning live refs", async 
   const targetRef = transformed.messages[0].content.find((block: { type: string; text: string }) => block.type === "text").text.match(/m\d{5}/)![0];
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw.e1, targetRef);
-  assert.equal(saved.messageRefs.byRaw["live-0"], undefined);
+  assert.equal(liveRawKeys(saved).length, 0);
 });
 
 test("omp rejects a non-contiguous persisted subsequence", async () => {
@@ -321,10 +258,12 @@ test("omp rejects a non-contiguous persisted subsequence", async () => {
   const firstRef = result.messages[0].content.find((block: { type: string; text: string }) => block.type === "text").text.match(/m\d{5}/)![0];
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw.e1, undefined);
-  assert.equal(saved.messageRefs.byRaw["live-0"], firstRef);
+  const liveEntries = Object.entries(saved.messageRefs.byRaw).filter(([k]) => k.startsWith("live-"));
+  assert.equal(liveEntries.length, 2, "both messages stay live: a non-contiguous subsequence must not align");
+  assert.ok(liveEntries.some(([, v]) => v === firstRef), "the live 'A' message keeps its own ref");
 });
 
-test("omp rejects ambiguous equal-length persisted runs", async () => {
+test("omp resolves an ambiguous equal-length run against the persisted tail (#459)", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api);
   const stateFile = "/tmp/nonexistent-pai-acp-ambiguous-run.session.json";
@@ -337,9 +276,9 @@ test("omp rejects ambiguous equal-length persisted runs", async () => {
   }, ctx);
   const liveRef = result.messages[0].content.find((block: { type: string; text: string }) => block.type === "text").text.match(/m\d{5}/)![0];
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
-  assert.equal(saved.messageRefs.byRaw.e1, undefined);
-  assert.equal(saved.messageRefs.byRaw.e2, undefined);
-  assert.equal(saved.messageRefs.byRaw["live-0"], liveRef);
+  assert.equal(saved.messageRefs.byRaw.e1, undefined, "only the most recent occurrence wins the tail anchor");
+  assert.equal(saved.messageRefs.byRaw.e2, liveRef, "the ambiguous match aligns deterministically to the persisted tail");
+  assert.equal(liveRawKeys(saved).length, 0, "no live id minted once aligned");
 });
 
 test("omp migrates a live ref after the provider context evicts its prefix", async () => {
@@ -355,7 +294,7 @@ test("omp migrates a live ref after the provider context evicts its prefix", asy
   await handlers.get("context")![0]!({ type: "context", messages: [first.messages[1], first.messages[2]] }, ctx);
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw.eB, bRef);
-  assert.equal(saved.messageRefs.byRaw["live-1"], undefined);
+  assert.equal(liveRawKeys(saved).length, 0);
   assert.equal(saved.messageRefs.byRef[bRef], "eB");
 });
 type PersistedEntry = { type: "message"; id: string; parentId: null; timestamp: string; message: Record<string, unknown> };
@@ -383,7 +322,7 @@ test.skip("omp does not bind a different toolCallId with identical visible text 
   await handlers.get("context")![0]!({ type: "context", messages: [toolResult("call-2")] }, ctx);
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw.e1, undefined, "a different toolCallId must not inherit the persisted identity");
-  assert.equal(saved.messageRefs.byRaw["live-0"], targetRef, "the live message keeps its own ref");
+  assert.equal(saved.messageRefs.byRaw[liveRawKeys(saved)[0]!], targetRef, "the live message keeps its own ref");
 });
 
 // SKIPPED (omp deprecated — see #237): same 0.0.48 ref-pruning conflict as above.
@@ -408,7 +347,7 @@ test.skip("omp does not bind differing image content with identical visible text
   await handlers.get("context")![0]!({ type: "context", messages: [imgMsg("img-2")] }, ctx);
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw.e1, undefined, "different image data must not inherit the persisted identity");
-  assert.equal(saved.messageRefs.byRaw["live-0"], targetRef, "the live message keeps its own ref");
+  assert.equal(saved.messageRefs.byRaw[liveRawKeys(saved)[0]!], targetRef, "the live message keeps its own ref");
 });
 
 test("omp matches emergency-truncated tool results before compression", async (t) => {
@@ -558,7 +497,7 @@ test("system prompt sources compression rules from acp-kernel (no hardcoded drif
   // injected delegate results as system notifications, not user messages)
   assert.ok(sp.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate notification section present");
   assert.ok(/NOT .*(user message|user request)/i.test(sp), "delegates marked as not-user-message");
-  assert.ok(sp.includes("acp_delegate_status"), "delegate status guidance present");
+  assert.ok(/no status tool|NO .?status tool|only way.*acp_delegate_wait/i.test(sp), "wait replaces status tool");
   // marker system removed entirely from kernel constants
   assert.ok(!sp.includes("[[KEEP:"), "no KEEP marker teaching");
   assert.ok(!sp.includes("[[REF:"), "no REF marker teaching");
@@ -594,13 +533,14 @@ test("omp migrates assistant tool-call refs after prefix eviction", async () => 
   const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
   await handlers.get("context")![0]!({ type: "context", messages: [assistant("call-a")] }, ctx);
   const firstState = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
-  const ref = firstState.messageRefs.byRaw["live-0"];
+  const root = liveRawKeys(firstState).find((k) => !k.includes("#"))!;
+  const ref = firstState.messageRefs.byRaw[root];
   assert.ok(ref, "assistant temporary ref must be assigned");
   persisted = [userMsg("older", "evicted"), { type: "message", id: "e-assistant", parentId: null, timestamp: "", message: assistant("call-a") }];
   await handlers.get("context")![0]!({ type: "context", messages: [assistant("call-a")] }, ctx);
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw["e-assistant"], ref);
-  assert.equal(saved.messageRefs.byRaw["live-0"], undefined);
+  assert.equal(liveRawKeys(saved).length, 0);
 });
 
 test("omp migrates parallel assistant tool-call child refs after prefix eviction", async () => {
@@ -617,16 +557,16 @@ test("omp migrates parallel assistant tool-call child refs after prefix eviction
   const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
   await handlers.get("context")![0]!({ type: "context", messages: [assistant()] }, ctx);
   const first = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
-  const callARef = first.messageRefs.byRaw["live-0#call-a"];
-  const callBRef = first.messageRefs.byRaw["live-0#call-b"];
+  const childKeys = liveRawKeys(first).filter((k) => k.includes("#"));
+  const callARef = first.messageRefs.byRaw[childKeys.find((k) => k.endsWith("#call-a"))!];
+  const callBRef = first.messageRefs.byRaw[childKeys.find((k) => k.endsWith("#call-b"))!];
   assert.ok(callARef && callBRef);
   persisted = [{ type: "message", id: "e-assistant", parentId: null, timestamp: "", message: assistant() }];
   await handlers.get("context")![0]!({ type: "context", messages: [assistant()] }, ctx);
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw["e-assistant#call-a"], callARef);
   assert.equal(saved.messageRefs.byRaw["e-assistant#call-b"], callBRef);
-  assert.equal(saved.messageRefs.byRaw["live-0#call-a"], undefined);
-  assert.equal(saved.messageRefs.byRaw["live-0#call-b"], undefined);
+  assert.equal(liveRawKeys(saved).length, 0, "root and child live refs all migrated");
 });
 
 test("omp reloads assistant origins before migrating after prefix eviction", async () => {
@@ -639,7 +579,7 @@ test("omp reloads assistant origins before migrating after prefix eviction", asy
   createAcpExtension({ modelContextLimit: 200_000 })(first.api);
   await first.handlers.get("context")![0]!({ type: "context", messages: [assistant("call-a")] }, makeCtx());
   const initial = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
-  const ref = initial.messageRefs.byRaw["live-0"];
+  const ref = initial.messageRefs.byRaw[liveRawKeys(initial)[0]!];
   assert.ok(ref);
   const second = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(second.api);
@@ -647,7 +587,7 @@ test("omp reloads assistant origins before migrating after prefix eviction", asy
   await second.handlers.get("context")![0]!({ type: "context", messages: [assistant("call-a")] }, makeCtx());
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw["e-assistant"], ref);
-  assert.equal(saved.messageRefs.byRaw["live-0"], undefined);
+  assert.equal(liveRawKeys(saved).length, 0);
   assert.equal(saved.messageRefs.byRef[ref], "e-assistant");
 });
 
@@ -661,7 +601,7 @@ test("omp preserves stable destination when migrating a colliding live ref", asy
   createAcpExtension({ modelContextLimit: 200_000 })(first.api);
   await first.handlers.get("context")![0]!({ type: "context", messages: [assistant("call-a")] }, makeCtx());
   const initial = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
-  const liveRef = initial.messageRefs.byRaw["live-0"];
+  const liveRef = initial.messageRefs.byRaw[liveRawKeys(initial)[0]!];
   assert.ok(liveRef);
   const stableRef = "m09999";
   initial.messageRefs.byRaw["e-assistant"] = stableRef;
@@ -675,7 +615,7 @@ test("omp preserves stable destination when migrating a colliding live ref", asy
   const saved = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
   assert.equal(saved.messageRefs.byRaw["e-assistant"], stableRef);
   assert.equal(saved.messageRefs.byRef[stableRef], "e-assistant");
-  assert.equal(saved.messageRefs.byRaw["live-0"], undefined);
+  assert.equal(liveRawKeys(saved).length, 0);
   assert.equal(saved.messageRefs.byRef[liveRef], undefined);
 });
 
@@ -690,7 +630,9 @@ test.skip("empty live context preserves refs created for an unpersisted message"
   await handlers.get("context")![0]!({ type: "context", messages: [{ role: "user", content: "live-only" }] }, ctx);
   await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
   const state = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
-  assert.equal(state.messageRefs.byRaw["live-0"], "m00001");
+  const keys = liveRawKeys(state);
+  assert.equal(keys.length, 1);
+  assert.equal(state.messageRefs.byRaw[keys[0]!], "m00001");
 });
 test("omp keeps compression blocks active when provider context has an extra prefix", async (t) => {
   const { api, handlers } = captureApi();
@@ -985,11 +927,27 @@ function standDownFixture(scope: StandDownScope) {
 async function withAgentDir(agentDir: string, fn: () => Promise<void>): Promise<void> {
   const prev = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = agentDir;
+  // Isolate HOME too: prompt/config assembly reads the developer's real
+  // ~/.pi/acp.json — e.g. `compress.promptPack: "lean"` swaps the acpTags
+  // section for its headerless short form and breaks the literal "ACP TAGS"
+  // assertions in these tests. Tests must not depend on the runner's home
+  // config (#484 triage: failed deterministically on any lean-pack dev box,
+  // green on CI's empty HOME — masking as a fake #415 regression).
+  const prevHome = process.env.HOME;
+  const prevUserProfile = process.env.USERPROFILE;
+  const home = join(dirname(agentDir), "home");
+  mkdirSync(home, { recursive: true });
+  process.env.HOME = home;
+  if (prevUserProfile !== undefined) process.env.USERPROFILE = home;
   try {
     await fn();
   } finally {
     if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = prev;
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (prevUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = prevUserProfile;
   }
 }
 
@@ -1007,7 +965,7 @@ test("#415: project-scope pi-subagents → acp_delegate stands down (tools, shor
       const { api, handlers } = captureApi();
       const shortcuts: string[] = [];
       (api as any).registerShortcut = (key: string) => { shortcuts.push(key); };
-      createAcpExtension({ delegate: { forceEnable: false } })(api as any);
+      createAcpExtension()(api as any);
 
       const notified: string[] = [];
       const ctx = piSessionCtx(fx.tmp, fx.cwd, {
@@ -1137,4 +1095,22 @@ test("#415: no pi-subagents → acp_delegate registers normally (regression guar
   } finally {
     fx.cleanup();
   }
+});
+
+test("withAgentDir restores PI_CODING_AGENT_DIR/HOME/USERPROFILE without leaking env", async () => {
+  const prevAgent = process.env.PI_CODING_AGENT_DIR;
+  const prevHome = process.env.HOME;
+  const prevUserProfile = process.env.USERPROFILE;
+  const tmp = mkdtempSync(join(tmpdir(), "acp-env-restore-"));
+  try {
+    await withAgentDir(join(tmp, "agent"), async () => {
+      assert.ok(process.env.PI_CODING_AGENT_DIR?.endsWith("agent"), "PI_CODING_AGENT_DIR points at the fixture");
+      assert.notEqual(process.env.HOME, prevHome, "HOME is isolated inside the fixture");
+    });
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+  assert.equal(process.env.PI_CODING_AGENT_DIR, prevAgent, "PI_CODING_AGENT_DIR restored verbatim (undefined must not become \"undefined\")");
+  assert.equal(process.env.HOME, prevHome, "HOME restored verbatim");
+  assert.equal(process.env.USERPROFILE, prevUserProfile, "USERPROFILE restored verbatim");
 });

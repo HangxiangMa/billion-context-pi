@@ -157,10 +157,10 @@ test("resolveDelegate: boolean shorthand leaves maxConcurrent unlimited", () => 
   assert.equal(r.maxConcurrent, Infinity);
 });
 
-test("resolveDelegate: forceEnable defaults to true", () => {
-  assert.equal(resolveDelegate({}).forceEnable, true);
-  assert.equal(resolveDelegate({ delegate: true }).forceEnable, true);
-  assert.equal(resolveDelegate({ delegate: { enabled: true } }).forceEnable, true);
+test("resolveDelegate: forceEnable defaults to false", () => {
+  assert.equal(resolveDelegate({}).forceEnable, false);
+  assert.equal(resolveDelegate({ delegate: true }).forceEnable, false);
+  assert.equal(resolveDelegate({ delegate: { enabled: true } }).forceEnable, false);
 });
 
 test("resolveDelegate: forceEnable true is honored; explicit false stays off", () => {
@@ -186,7 +186,7 @@ test("resolveDelegate: unparseable PI_ACP_DELEGATE_FORCE_ENABLE falls back to th
   const prev = process.env.PI_ACP_DELEGATE_FORCE_ENABLE;
   try {
     process.env.PI_ACP_DELEGATE_FORCE_ENABLE = "maybe";
-    assert.equal(resolveDelegate({}).forceEnable, true);
+    assert.equal(resolveDelegate({}).forceEnable, false);
     assert.equal(resolveDelegate({ delegate: { forceEnable: true } }).forceEnable, true);
   } finally {
     if (prev === undefined) delete process.env.PI_ACP_DELEGATE_FORCE_ENABLE;

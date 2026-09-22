@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildChildArgs, delegateSpawnOptions, terminateDelegateChild, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, effectiveExitCode, formatRunResult, resolveWaitTimeoutMs, findUndeliveredRuns, undeliveredNoticeFrom, buildRecoveryNotice, makeDelegateTool, exitLabel, cancelledFileNote, delegateStdinText, readActivityTail, scheduleRunNotification, flushDelegateNotifications, formatBatchRunSection, setDelegatePolicy, delegateChildEnv, asyncWatchdogDescription, ConcurrencyGate, setDelegateDefaults, resetDelegateDefaults, isValidThinkingLevel, resolvePerCallTimeoutMs } from "../src/delegate-tool.js";
+import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, effectiveExitCode, formatRunResult, resolveWaitTimeoutMs, findUndeliveredRuns, undeliveredNoticeFrom, buildRecoveryNotice, makeDelegateTool, exitLabel, cancelledFileNote, delegateStdinText, readActivityTail, scheduleRunNotification, flushDelegateNotifications, formatBatchRunSection, setDelegatePolicy, delegateChildEnv, asyncWatchdogDescription, ConcurrencyGate, setDelegateDefaults, resetDelegateDefaults, isValidThinkingLevel, resolvePerCallTimeoutMs } from "../src/delegate-tool.js";
 import { DEFAULT_DELEGATE_POLICY } from "../src/config.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -25,20 +25,6 @@ test("delegate spawn bypasses the shell for Windows executable paths", () => {
   assert.equal(options.shell, false);
   assert.equal(options.cwd, "C:\\workspace");
   assert.deepEqual(options.stdio, ["pipe", "pipe", "pipe"]);
-  assert.equal(options.detached, process.platform !== "win32");
-});
-
-test("delegate termination falls back to direct child when process group is gone", () => {
-  const signals: NodeJS.Signals[] = [];
-  const child = {
-    pid: 999_999_999,
-    kill: (signal: NodeJS.Signals) => {
-      signals.push(signal);
-      return true;
-    },
-  };
-  assert.equal(terminateDelegateChild(child, "SIGTERM"), true);
-  assert.deepEqual(signals, ["SIGTERM"]);
 });
 
 /** Parse the --tools value from cliArgs, or null if absent. */
@@ -1017,10 +1003,7 @@ test("delegateChildEnv increments depth and propagates the maxDepth cap", () => 
   const env = delegateChildEnv(1, 3);
   assert.equal(env.PI_ACP_DELEGATE_DEPTH, "2", "child depth = parent + 1");
   assert.equal(env.PI_ACP_DELEGATE_MAX_DEPTH, "3", "cap follows the delegation tree");
-  const parentSubagentDepth = Number.parseInt(process.env.PI_SUBAGENT_DEPTH ?? "0", 10) || 0;
-  assert.equal(env.PI_SUBAGENT_DEPTH, String(parentSubagentDepth + 1), "ACP child cannot start a nested pi-subagents tree");
   for (const [key, value] of Object.entries(process.env)) {
-    if (key === "PI_SUBAGENT_DEPTH") continue;
     assert.equal(env[key], value, `parent env ${key} inherited`);
   }
 });

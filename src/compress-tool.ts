@@ -13,6 +13,7 @@ import { applyToolPromptOverrides, type ToolPromptOverrides } from "./surface.js
 import { resolveHostSession } from "./config.js";
 import { defaultCountTokens, parseCompressArgs, viableRanges, formatRanges, type CompressionBlock, type CompressionState, type CompressParseDiagnostics, type NudgeDecision } from "acp-kernel";
 import { countUnicodeEscapes, findUnverifiableUserQuote, sanitizeSummary } from "./summary-sanitize.js";
+import { assertNotAborted } from "./abort.js";
 import { getSystemPromptText } from "./compat.js";
 import { UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
 
@@ -58,11 +59,11 @@ export function makeCompressTool(runtime: AcpRuntime, overrides?: ToolPromptOver
       "Never compress content the current step is actively using.",
     ],
     parameters: CompressParams,
-    async execute(toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
+    async execute(toolCallId, params, signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
       if (runtime.refused) return { details: undefined, content: [{ type: "text", text: runtime.refusalMessage ?? UNSUPPORTED_HOST_MESSAGE }] };
       let result: string;
       try {
-        result = await handleCompress(params as CompressArgs, runtime, ctx, toolCallId);
+        result = await handleCompress(params as CompressArgs, runtime, ctx, toolCallId, signal);
       } catch (e) {
         logThrow("compress", e, { sid: ctx.sessionManager.getSessionId(), ranges: typeof (params as CompressArgs).content === "string" ? "string" : ((params as CompressArgs).content?.length ?? 0) });
         throw e;
@@ -82,7 +83,7 @@ type RangeEntry = Static<typeof RangeSpec>;
 // as neutral). An empty array passes through (the call site returns "No
 // ranges provided.").
 export function normalizeRanges(args: CompressArgs): RangeEntry[] | string {
-  const effective = repairContentTail(args);
+  const effective = repairContentTail(repairBareRangeObjects(args));
   const { ranges, diagnostics } = parseCompressArgs(effective);
   if (ranges.length === 0) {
     if (Array.isArray(effective.content) && effective.content.length === 0) return [];
@@ -119,6 +120,90 @@ export function tailRepair(s: string): string | undefined {
     // not the missing-brace case
   }
   return undefined;
+}
+
+// Small models in non-strict tool-call mode sometimes emit `content` as a
+// string of bare range objects WITHOUT the wrapping array brackets — one
+// object (`{"startId":...}`) or several concatenated (`{...}{...}`, missing
+// the outer `[]` and/or the commas between entries). The kernel parser only
+// salvages entries from a `[`-anchored array, so these payloads die with a
+// misleading "must be an ARRAY" / "failed to parse" diagnostic that the model
+// cannot act on (#480). Extract the top-level objects and re-wrap them as a
+// proper array before delegating.
+function repairBareRangeObjects(args: CompressArgs): CompressArgs {
+  if (typeof args.content !== "string") return args;
+  const repaired = arrayWrapRepair(args.content);
+  return repaired === undefined ? args : { ...args, content: repaired };
+}
+
+// Deterministic re-wrap: collect the balanced `{...}` segments at depth 0
+// (outside strings), keep those that validate as range specs, and return them
+// as a JSON array string. Returns undefined when nothing range-shaped is
+// found at top level, leaving accurate error reporting to the normal path.
+export function arrayWrapRepair(s: string): string | undefined {
+  const objects = extractTopLevelObjects(s)
+    .map((candidate): unknown => {
+      try {
+        return JSON.parse(candidate);
+      } catch {
+        return undefined;
+      }
+    })
+    .filter((o): o is Record<string, unknown> => isRangeLikeObject(o));
+  if (objects.length === 0) return undefined;
+  return JSON.stringify(objects);
+}
+
+// Balanced `{...}` segments at depth 0 (outside strings). Stray closers
+// resync instead of aborting, so garbage between or before objects is skipped;
+// `[`-anchored arrays never yield candidates (their `{` sit at depth ≥ 1).
+function extractTopLevelObjects(s: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let start = -1;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s.charAt(i);
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === "{" || ch === "[") {
+      if (depth === 0 && ch === "{" && start === -1) start = i;
+      depth++;
+      continue;
+    }
+    if (ch === "}" || ch === "]") {
+      depth--;
+      if (depth < 0) {
+        depth = 0;
+        start = -1;
+        continue;
+      }
+      if (depth === 0 && start !== -1) {
+        out.push(s.slice(start, i + 1));
+        start = -1;
+      }
+    }
+  }
+  return out;
+}
+
+// Same field aliases the kernel's validateEntry accepts — the repair must not
+// reject shapes the parser would have accepted.
+function isRangeLikeObject(o: unknown): o is Record<string, unknown> {
+  if (o === null || typeof o !== "object" || Array.isArray(o)) return false;
+  const r = o as Record<string, unknown>;
+  const hasStart = typeof r.startId === "string" || typeof r.startRef === "string" || typeof r.messageId === "string";
+  const hasEnd = typeof r.endId === "string" || typeof r.endRef === "string" || typeof r.messageId === "string";
+  return hasStart && hasEnd && typeof r.summary === "string" && r.summary.length > 0;
 }
 
 function describeDiagnostics(diagnostics: CompressParseDiagnostics, content: CompressArgs["content"]): string {
@@ -339,7 +424,8 @@ function tierReadyHint(state: CompressionState, config: ReturnType<AcpRuntime["c
   return "";
 }
 
-async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId?: string): Promise<string> {
+async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId?: string, signal?: AbortSignal): Promise<string> {
+  assertNotAborted(signal);
   const maybeRanges = normalizeRanges(args);
   // Argument errors throw (not return): pi-agent-core only sets isError:true
   // on THROWN tool errors, and the failure counter keys off isError. A
@@ -349,6 +435,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   const ranges = maybeRanges;
   if (ranges.length === 0) return "No ranges provided.";
   const { state: initialState, coreMessages, entries } = await runtime.stateFor(ctx);
+  assertNotAborted(signal);
   const config = runtime.configFor(ctx);
   // Sent-view arbitration — the same scale as the context transform and
   // acp_status (see src/index.ts): never the session-tree tokenCount.
@@ -421,6 +508,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     state,
     config,
   });
+  assertNotAborted(signal);
   const rewriteSpans = applied.result.blocksCreated > 0
     ? tier3OnlyRewrite(applied.state.blocks.slice(-applied.result.blocksCreated), applied.state.blocks)
     : null;
@@ -496,10 +584,11 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   });
   if (errors.length > 0) {
     logError("compress", { sid: ctx.sessionManager.getSessionId(), event: "errors", count: errors.length, errors: errors.slice(0, 5) });
-    // #454 stopgap: ref-resolution failures on a declared fork host carry the
-    // live-entry drift signature (see mergeLiveEntries in runtime.ts) — the
-    // same defect class OMP is refused for. Attribute it to #459 in support
-    // logs so "does not exist" spam is not misread as model misbehavior.
+    // Residual drift signal (#454/#459): with content-stable live ids,
+    // ref-resolution failures on a declared fork host mean the host rewrote or
+    // shrank its in-flight view (see mergeLiveEntries in runtime.ts). Attribute
+    // it in support logs so "does not exist" spam is not misread as model
+    // misbehavior.
     if (blocksCreated === 0 && isDeclaredForkHost() && !isPiHost(ctx.sessionManager)
       && /does not exist|cannot be anchored|is unknown|unknown refs/i.test(errors.join(" "))) {
       logWarn("compress", { sid: ctx.sessionManager.getSessionId(), event: "fork-ref-drift-suspected", seeIssue: "#459", errors: errors.slice(0, 3) });
@@ -515,5 +604,15 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   const lines = [`▣ ACP | ${formatK(beforeTokens)} → ${formatK(afterTokens)} tokens (~${formatK(reclaimed)} reclaimed, ${spanClause})`];
   if (warnings.length > 0) lines.push("⚠️ " + warnings.join("; "));
   if (errors.length > 0) lines.push("Errors: " + errors.join("; "));
+  // #420: carry the post-compression snapshot so a same-turn follow-up
+  // compress has its refs without a planning acp_status call. Computed from
+  // afterTurn (processTurn over the applied state), so the list reflects
+  // what actually remains — not the pre-fold view.
+  if (blocksCreated > 0) {
+    const afterSnapshot = compressibleSnapshotText(afterTurn.nudge);
+    if (!afterSnapshot.startsWith("No compressible")) {
+      lines.push("Current compressible ranges (use these refs exactly as listed):\n" + afterSnapshot);
+    }
+  }
   return lines.join("\n");
 }
