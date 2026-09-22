@@ -247,7 +247,7 @@ billion-context 保护四类内容不被压缩:
 1. **永久保护的工具** — `compress` 调用被硬保护(它们是承载关键元数据的;压缩它们会破坏 decompress 和"摘要是历史"的契约)。
 2. **软近期区** — 最后 N 条消息(默认 5)和最后约 5K token 被软保护,让模型保留工作集。来自 `decompress`、`search_context`、`read`、`bash` 的工具结果被**排除**出此区:它们体量大、消费后就该能压缩,所以不该占用保护预算。
 3. **最后一条用户消息** — 始终保护(用户意图必须存活)。
-4. **用户配置的工具保护** — `acp.json` 中的 `protectedTools` / `protectedLatestTools` 硬排除匹配的工具 call+result(全历史 vs 仅最近一次;见 [CONFIGURATION.md](./CONFIGURATION.md))。
+4. **用户配置的工具保护** — `acp.json` 中的 `protectedTools` / `protectedLatestTools` 硬排除匹配的工具 call+result(全历史 vs 仅最近一次;见 [CONFIGURATION.zh-CN.md](./CONFIGURATION.zh-CN.md))。
 
 ## 会话存储与迁移
 
