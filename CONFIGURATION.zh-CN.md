@@ -232,7 +232,7 @@
 - **类型：** `number`
 - **默认值：** *(自动)* —— 每轮实时读取模型的 `contextWindow`
 - **状态：** 🟢 ACTIVE
-- **说明：** 覆盖上下文窗口大小（token 数）。默认每轮从活跃模型的 `ctx.model.contextWindow` 读取，切换模型时自动保持正确。在模型元数据可能不可用的测试或无头/非交互会话中，可设置显式值。环境变量 `ACP_MODEL_CONTEXT_LIMIT` 优先于此值。
+- **说明：** 覆盖上下文窗口大小（token 数）。默认每轮从活跃模型的 `ctx.model.contextWindow` 读取，切换模型时自动保持正确。在模型元数据可能不可用的测试或无头/非交互会话中，可设置显式值。环境变量 `ACP_MODEL_CONTEXT_LIMIT` 优先于此值。注意该值同时也是**所有百分比压缩阈值的分母**（`maxContextLimit`、`emergencyThresholdPercent`）——调低它会按比例把所有触发点下移。要在不缩小这个分母的前提下保持日常上下文偏小，见[软目标与弹性余量](#软目标与弹性余量-1122)。
 
 ### `outputHeadroomMaxPct`
 
@@ -624,6 +624,33 @@
 - **默认：** `"default"`
 - **状态：** 🟢 ACTIVE
 - **描述：** 选择一个**提示词包（prompt pack）**——一组命名的表面覆盖（提示词分段、nudge 分段、工具提示词、delegate 提示词、四条压缩规则），作为 `acp.json` 内联覆盖之下的基础层生效。与其他 `compress.*` 字段走同一三级级联：`models > providers > global`，逐回合按当前模型解析。完整参考与内置 `lean` 包见[提示词包](#提示词包)。
+
+### 软目标与弹性余量 (#1122)
+
+「日常保持小上下文」是一个**成本目标**，不是窗口大小。[billion-context#1122](https://github.com/ranxianglei/billion-context/issues/1122) 背后的常见误配，就是把 `modelContextLimit` 设到模型原生窗口以下来表达这个目标——例如在 200k 的模型上设 70k 限制来「保持在 40k 左右」。由于所有百分比阈值都以 `modelContextLimit` 为分母，这会把*所有*触发点锚定到缩小后的值：强制 nudge 从 70k 的 75% ≈ 52.5k 开始，有损的紧急截断在 ~66.5k 就触发——于是真正需要 80k 上下文的合法任务会在中途被反复压缩、最终被截断。
+
+配方：**分母保持在真实窗口，成本目标改用现成的软阈值表达。**
+
+```jsonc
+{
+  // "modelContextLimit": 200000,   // 可选——不填则跟随 Pi 实时模型目录
+  "compress": {
+    "maxContextLimit": "35%"        // 软目标 ≈ 200k 窗口下的 70k（= 目标 ÷ 原生窗口）
+  }
+}
+```
+
+压缩实际如何被触发（三层）：
+
+1. **增长层**（日常主力）——**绝对 token 数，按设计独立于 `modelContextLimit`**：自上一个锚点（会话开始 / 上次压缩 / 收缩后重置）以来的累计增长越过节奏下限（`max(20k, 45% × nudgeGrowthTokens)`，默认 ≈ 22.5k）、且有效可压缩量足够（约 `nudgeGrowthTokens`）时，发一次软 nudge。把窗口设大**不会**推迟这一层。
+2. **压力层**——唯一按 % 锚定的部分：`usage ≥ maxContextLimit`（默认 75%）→ 每轮强制 nudge；≥ 95% → 紧急截断。随 `modelContextLimit` 缩放。
+3. **资格层**——内核默认 45%，本扩展未暴露；只管首轮冷启动门票与 T2/T3 块数升级。
+
+注意：
+
+- `maxContextLimit` 设到 45% 以下功能正确（各层门控相互独立），但 acp-kernel 每轮会打一条校验告警——纯日志噪音，阈值不受影响（跟踪于 acp-kernel#346）。
+- 与旧的「低限制」配置相比的行为差异：强制区从 75%×旧限制 上移到 所选%×原生窗口，紧急截断从 ~95%×旧限制 回到真实边缘（~95%×原生）。增长锚点与强制区之间，上下文可能漂移到目标之下——这个漂移就是弹性的代价。若需要同时满足「严格上限 + 突发余量」，需要结构感知压缩（[billion-context#344](https://github.com/ranxianglei/billion-context/issues/344)），而不是缩小分母。
+- 以上全部通过下文的三级级联（`models > providers > global`）解析，不同模型可以共存不同目标。
 
 ### `compress.providers` —— 按 provider / 按 model 覆盖
 

@@ -236,7 +236,7 @@ All keys below are currently **ACTIVE**.
 - **Type:** `number`
 - **Default:** *(auto)* — the model's `contextWindow` read live each turn
 - **Status:** 🟢 ACTIVE
-- **Description:** Override the context limit, in tokens. By default the limit is read from the active model's `ctx.model.contextWindow` on every turn, so it stays correct when you switch models. Set an explicit value for deterministic test runs or headless/non-interactive sessions where the model metadata may be unavailable. The `ACP_MODEL_CONTEXT_LIMIT` environment variable takes precedence over this value.
+- **Description:** Override the context limit, in tokens. By default the limit is read from the active model's `ctx.model.contextWindow` on every turn, so it stays correct when you switch models. Set an explicit value for deterministic test runs or headless/non-interactive sessions where the model metadata may be unavailable. The `ACP_MODEL_CONTEXT_LIMIT` environment variable takes precedence over this value. Note this value is also the **denominator of all percentage compression thresholds** (`maxContextLimit`, `emergencyThresholdPercent`) — lowering it moves every trigger point down proportionally. To keep day-to-day context small without shrinking this denominator, see [Soft target with elastic headroom](#soft-target-with-elastic-headroom-1122).
 
 ### `outputHeadroomMaxPct`
 
@@ -628,6 +628,33 @@ The flow is:
 - **Default:** `"default"`
 - **Status:** 🟢 ACTIVE
 - **Description:** Selects a **prompt pack** — a named bundle of surface overrides (prompt sections, nudge sections, tool prompts, delegate prompt, compression rules) applied as the base layer under your inline `acp.json` overrides. Resolved through the same three-level cascade as every other `compress.*` field: `models > providers > global`, per active model, per turn. See [Prompt Packs](#prompt-packs) for the full reference and the built-in `lean` pack.
+
+### Soft target with elastic headroom (#1122)
+
+Keeping day-to-day context small is a **cost target**, not a window size. The common misconfiguration behind [billion-context#1122](https://github.com/ranxianglei/billion-context/issues/1122) is setting `modelContextLimit` below the model's native window to express that target — e.g., a 70k limit on a 200k model "to keep things around 40k". Because every percentage threshold is measured against `modelContextLimit`, this anchors *all* triggers to the shrunken value: forced nudges start at 75% of 70k ≈ 52.5k, and lossy emergency truncation fires at ~66.5k — so a legitimate task that genuinely needs 80k of context gets compressed, and eventually truncated, mid-task.
+
+The recipe: keep the denominator at the true window and express the cost target through the existing soft threshold instead.
+
+```jsonc
+{
+  // "modelContextLimit": 200000,   // optional — omit to follow Pi's live model catalog
+  "compress": {
+    "maxContextLimit": "35%"        // soft target ≈ 70k on a 200k window (= target ÷ native window)
+  }
+}
+```
+
+How compression actually gets triggered (three layers):
+
+1. **Growth layer** (day-to-day driver) — **absolute tokens, independent of `modelContextLimit` by design**: a soft nudge fires once cumulative growth since the last anchor (session start / last compress / post-shrink reset) passes the cadence floor (`max(20k, 45% × nudgeGrowthTokens)` ≈ 22.5k by default), provided there is enough effective compressible content (~`nudgeGrowthTokens`). Keeping the window large does NOT delay this layer.
+2. **Pressure layer** — the only %-anchored part: `usage ≥ maxContextLimit` (default 75%) → forced nudge every turn; ≥ 95% → emergency truncation. Scales with `modelContextLimit`.
+3. **Qualification layer** — kernel default 45%, not exposed here; gates only the turn-1 cold-start ticket and T2/T3 block-count escalation.
+
+Notes:
+
+- Setting `maxContextLimit` below 45% works correctly (the layers gate independent paths), but acp-kernel logs one validation warning per turn — log noise only, thresholds unaffected (tracked in acp-kernel#346).
+- Behavior delta vs the old low-limit config: the forced zone moves from 75%×old-limit up to chosen-%×native-window, and emergency truncation moves from ~95%×old-limit back to the true edge (~95%×native). Between the growth anchors and the forced zone, context may drift below your target — that drift is the price of elasticity. A strict ceiling *and* burst headroom simultaneously needs structure-aware compression ([billion-context#344](https://github.com/ranxianglei/billion-context/issues/344)), not a smaller denominator.
+- All of this resolves through the three-level cascade below (`models > providers > global`), so different targets can coexist across models.
 
 ### `compress.providers` — per-provider & per-model overrides
 
