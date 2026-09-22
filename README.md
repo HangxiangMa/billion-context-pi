@@ -10,6 +10,14 @@ The model decides <em>when</em> and <em>what</em> to compress — not a hard lim
 
 ---
 
+## Community
+
+QQ Group:
+1056132097 (full)
+1108730198 (open)
+
+---
+
 ## 📄 Paper / Preprint
 
 - **[Model-Driven Incremental Hierarchical Compression: Training-Free Multi-Generational Context Management for Long-Lived Coding Agents](./paper/model-driven-incremental-hierarchical-compression-training-free-multi-generational-context-management-for-long-lived-coding-agents.md)** (English, v0.2)
@@ -33,14 +41,6 @@ A production-scale longitudinal study: 4.5 months, three hosts, 174,327 model ca
 ---
 
 > **Host support:** this plugin is for **Pi**. It does **not** support **OMP (oh-my-pi)** — on an OMP host it refuses to run. OMP users: use [billion-context](https://github.com/ranxianglei/billion-context) instead (`bili omp`, built-in plugin). Full client → package table: see [Which do I need?](#which-do-i-need); OMP details: [docs/omp.md](./docs/omp.md).
-
-## Community
-
-Discussion, help, and updates on QQ — one group covers all three projects (`billion-context`, `billion-context-pi`, `opencode-acp`). Please join the new group:
-
-**QQ Group: 1108730198**
-
-> The original group **1056132097** is now full and no longer accepts new members.
 
 ## Why?
 
