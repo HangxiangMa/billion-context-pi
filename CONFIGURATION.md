@@ -127,6 +127,8 @@ All keys below are currently **ACTIVE**.
 | `outputHeadroomMaxPct` | number \| string | `0.25` | 🟢 ACTIVE | Cap on the output-headroom reservation, as a fraction of the context window. |
 | `toolBashDefaultTimeout` | number | `60` | 🟢 ACTIVE | Default `bash` tool timeout in seconds when the model omits it. |
 | `toolOutputMaxBytes` | number | `50000` | 🟢 ACTIVE | Hard byte cap on tool result text. |
+| `protectedTools` | string\[\] | `none` | 🟢 ACTIVE | Tool-name patterns (glob suffix allowed) whose **every** call+result pair is hard-excluded from compression (refs render `BLOCKED`). For low-frequency, high-value tools with independent outputs — see the ⚠ note below. |
+| `protectedLatestTools` | string\[\] | `none` | 🟢 ACTIVE | Tool-name patterns (glob suffix allowed) whose **latest** call+result pair is hard-excluded from compression; older pairs remain compressible. For cumulative-snapshot tools. |
 | `throttleRetry` | boolean \| object | `true` | 🟢 ACTIVE | Auto-retry provider token rate-limit errors with progressive backoff. |
 | `repetitionGuard` | boolean \| object | `true` | 🟢 ACTIVE | Break infinite loops of byte-identical tool calls (warn at 3 consecutive, block + abort at 5). |
 | `degenerationGuard` | boolean \| object | `true` | 🟢 ACTIVE | Collapse degenerate single-codepoint runs (e.g. 4655×「【」) in assistant text/thinking of the outgoing view and inject a one-shot recovery notice — breaks the abort loop where pi replays degenerated thinking back to the provider on every request (#351). |
@@ -202,7 +204,7 @@ All keys below are currently **ACTIVE**.
 | `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES` | Override `delegate.asyncTimeoutMinutes`; `0` disables the async hard limit. |
 | `PI_ACP_DELEGATE_FORCE_ENABLE` | Override `delegate.forceEnable`; takes `true` / `false`. |
 
-> **Only the documented keys are read from `acp.json`.** Other tuning knobs (`preserveRecentMessages`, `protectedTools`) are code-level and not user-overridable. The three compression thresholds form a three-tier escalation: growth-driven soft nudges → forced nudges at `compress.maxContextLimit` → emergency truncation at `compress.emergencyThresholdPercent`.
+> **Only the documented keys are read from `acp.json`.** Other tuning knobs (`preserveRecentMessages`) are code-level and not user-overridable. The three compression thresholds form a three-tier escalation: growth-driven soft nudges → forced nudges at `compress.maxContextLimit` → emergency truncation at `compress.emergencyThresholdPercent`.
 
 ---
 
@@ -258,6 +260,21 @@ All keys below are currently **ACTIVE**.
 - **Default:** `50000`
 - **Status:** 🟢 ACTIVE
 - **Description:** A hard byte cap (~50 KB, roughly 1250 lines) applied to tool result text via the `tool_result` hook. Aligned with Pi's own bash/read/grep cap so every tool path lands under one ceiling; the net still catches runaway output from tools Pi does not cap (MCP/custom). When the cap fires, the oversized text is head-truncated with a notice telling the model how to see the full output. Set higher for large MCP outputs, lower (e.g. `8192`) for a tighter context budget, or set to `0` to disable the cap entirely.
+
+### `protectedTools`
+
+- **Type:** `string[]`
+- **Default:** `none` (empty)
+- **Status:** 🟢 ACTIVE
+- **Description:** Tool-name patterns (glob suffix allowed, e.g. `"skill"`, `"read_*"`) whose **every** call+result pair is hard-excluded from compression: matching refs render as `BLOCKED` in every view, in both compression modes and across all wires. Intended for low-frequency, high-value tools whose outputs are **independent content** rather than cumulative snapshots (e.g. opencode/pi `skill` loads, one-shot references). Malformed values (non-array, empty array, non-string or blank entries) are rejected with a loud warning and ignored — they never fail the session.
+- **⚠ When to use which knob:** protecting ALL instances of a chatty tool grows context unboundedly — never put high-frequency tools here. Independent-content tools → `protectedTools`; cumulative-snapshot tools (each call supersedes the last) → `protectedLatestTools`; chatty tools → neither (rely on the soft recent-zone instead). Rule of thumb: if you would be annoyed to keep every single output forever, do not protect it fully.
+
+### `protectedLatestTools`
+
+- **Type:** `string[]`
+- **Default:** `none` (empty)
+- **Status:** 🟢 ACTIVE
+- **Description:** Tool-name patterns (glob suffix allowed) whose **latest** call+result pair is hard-excluded from compression (matching refs render as `BLOCKED`); older pairs remain compressible. Intended for cumulative-snapshot tools where each call supersedes the last. Same validation rules as `protectedTools`. See the ⚠ note under `protectedTools` for when to use which knob.
 
 ---
 
