@@ -126,6 +126,8 @@
 | `outputHeadroomMaxPct` | number \| string | `0.25` | 🟢 ACTIVE | 输出预留（output headroom）占上下文窗口的比例上限。 |
 | `toolBashDefaultTimeout` | number | `60` | 🟢 ACTIVE | 模型省略 `timeout` 时注入 bash 工具的默认超时秒数。 |
 | `toolOutputMaxBytes` | number | `50000` | 🟢 ACTIVE | 工具返回文本的硬性字节上限。 |
+| `protectedTools` | string\[\] | `无` | 🟢 ACTIVE | 工具名模式（支持 glob 后缀），其**所有** call+result 对都被硬排除在压缩之外（ref 渲染为 `BLOCKED`）。适用于低频高价值、输出为独立内容的工具——见下方 ⚠ 说明。 |
+| `protectedLatestTools` | string\[\] | `无` | 🟢 ACTIVE | 工具名模式（支持 glob 后缀），仅**最近一次** call+result 对被硬排除在压缩之外；更早的对仍可压缩。适用于累积快照型工具。 |
 | `throttleRetry` | boolean \| object | `true` | 🟢 ACTIVE | 自动重试 provider 侧 token 限流错误（递进退避）。 |
 | `repetitionGuard` | boolean \| object | `true` | 🟢 ACTIVE | 打断字节级完全相同的工具调用死循环（连续 3 次告警，连续 5 次拦截并中止本轮）。 |
 | `degenerationGuard` | boolean \| object | `true` | 🟢 ACTIVE | 折叠出站视图中 assistant text/thinking 里的单字符退化连击（如 4655×「【」）并注入一次性恢复通知——打破 pi 每轮请求都回传退化 thinking 导致的连环 abort 死循环（#351）。 |
@@ -205,7 +207,7 @@
 | `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES` | 覆盖 `delegate.asyncTimeoutMinutes`；`0` 禁用异步硬上限。 |
 | `PI_ACP_DELEGATE_FORCE_ENABLE` | 覆盖 `delegate.forceEnable`；取值 `true` / `false`。 |
 
-> **只有文档中列出的键才会从 `acp.json` 读取。** 其他调优参数（`preserveRecentMessages`、`protectedTools`）是代码级别的，不开放给用户。三个压缩阈值构成三级递进：基于增长的软 nudge → 越过 `compress.maxContextLimit` 后的强制 nudge → 越过 `compress.emergencyThresholdPercent` 后的紧急截断。
+> **只有文档中列出的键才会从 `acp.json` 读取。** 其他调优参数（`preserveRecentMessages`）是代码级别的，不开放给用户。三个压缩阈值构成三级递进：基于增长的软 nudge → 越过 `compress.maxContextLimit` 后的强制 nudge → 越过 `compress.emergencyThresholdPercent` 后的紧急截断。
 
 ---
 
@@ -254,6 +256,21 @@
 - **默认值：** `50000`
 - **状态：** 🟢 ACTIVE
 - **说明：** 通过 `tool_result` 钩子对工具返回文本施加的硬性字节上限（约 50KB，约 1250 行）。与 Pi 自身对 bash/read/grep 的上限对齐——所有工具路径统一一条天花板；对 Pi 不做限制的工具（MCP/自定义）仍能拦截失控输出。触发上限时，超长文本会被头部截断，并附带提示告知模型如何查看完整输出。需要更大输出时调高、设小一些（如 `8192`）可收紧上下文预算，设为 `0` 则完全禁用。
+
+### `protectedTools`
+
+- **类型：** `string[]`
+- **默认值：** `无`（空）
+- **状态：** 🟢 ACTIVE
+- **说明：** 工具名模式（支持 glob 后缀，如 `"skill"`、`"read_*"`）——匹配的**所有** call+result 对都被硬排除在压缩之外：这些 ref 在任何视图中都渲染为 `BLOCKED`，两种压缩模式、所有 wire 均生效。适用于低频、高价值、输出为**独立内容**而非累积快照的工具（例如 opencode/pi 的 `skill` 加载、一次性引用）。格式错误的值（非数组、空数组、非字符串或空白项）会被大声警告并忽略——绝不会导致会话失败。
+- **⚠ 两个旋钮何时用哪个：** 对高频刷屏工具做全历史保护会让上下文无限膨胀——绝不要把高频工具放在这里。独立内容型工具 → `protectedTools`；累积快照型工具（每次调用取代上一次）→ `protectedLatestTools`；高频工具 → 都不要放（依赖软近期区即可）。经验法则：如果你会厌烦于永远保留它的每一次输出，就不要对它做全历史保护。
+
+### `protectedLatestTools`
+
+- **类型：** `string[]`
+- **默认值：** `无`（空）
+- **状态：** 🟢 ACTIVE
+- **说明：** 工具名模式（支持 glob 后缀）——仅匹配的**最近一次** call+result 对被硬排除在压缩之外（ref 渲染为 `BLOCKED`），更早的对仍可压缩。适用于每次调用取代上一次的累积快照型工具。校验规则与 `protectedTools` 相同。何时用哪个旋钮见 `protectedTools` 下的 ⚠ 说明。
 
 ---
 

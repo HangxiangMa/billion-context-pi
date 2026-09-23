@@ -477,3 +477,15 @@ test("resolveHostSession falls back to off for invalid values", () => {
   assert.deepEqual(resolveHostSession({ hostSession: "yes" as unknown as boolean }), { countCustomMessages: false });
   assert.deepEqual(resolveHostSession({ hostSession: { countCustomMessages: "yes" as unknown as boolean } }), { countCustomMessages: false });
 });
+
+test("resolveConfig forwards protection keys into the kernel config", () => {
+  const cfg = resolveConfig({ protectedTools: ["skill"], protectedLatestTools: ["read_*"] }, 200_000);
+  assert.deepEqual(cfg.protectedTools, ["skill"]);
+  assert.deepEqual(cfg.protectedLatestTools, ["read_*"]);
+});
+
+test("resolveConfig defaults protection keys to empty when unset", () => {
+  const cfg = resolveConfig(EMPTY, 200_000);
+  assert.deepEqual(cfg.protectedTools, []);
+  assert.deepEqual(cfg.protectedLatestTools, []);
+});

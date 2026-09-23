@@ -253,11 +253,12 @@ The model receives detailed guidance (in its system prompt) on **when** to compr
 
 ### What gets protected
 
-billion-context protects three categories of content from compression:
+billion-context protects four categories of content from compression:
 
 1. **Always-protected tools** — `compress` calls are hard-protected (they're load-bearing metadata; compressing them breaks decompress and the "summary is historical" contract).
 2. **Soft recent-zone** — the last N messages (default 5) and last ~5K tokens are soft-protected so the model keeps its working set. Tool results from `decompress`, `search_context`, `read`, and `bash` are **excluded** from this zone: they're large and meant to be compressible once consumed, so they don't eat the protected budget.
 3. **Last user message** — always protected (user intent must survive).
+4. **User-configured tool protection** — `protectedTools` / `protectedLatestTools` in `acp.json` hard-exclude matched tool calls+results (full history vs. latest-only; see [CONFIGURATION.md](./CONFIGURATION.md)).
 
 ## Session storage & migration
 
