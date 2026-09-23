@@ -127,6 +127,8 @@ All keys below are currently **ACTIVE**.
 | `outputHeadroomMaxPct` | number \| string | `0.25` | 🟢 ACTIVE | Cap on the output-headroom reservation, as a fraction of the context window. |
 | `toolBashDefaultTimeout` | number | `60` | 🟢 ACTIVE | Default `bash` tool timeout in seconds when the model omits it. |
 | `toolOutputMaxBytes` | number | `50000` | 🟢 ACTIVE | Hard byte cap on tool result text. |
+| `protectedTools` | string\[\] | `none` | 🟢 ACTIVE | Tool-name patterns (glob suffix allowed) whose **every** call+result pair is hard-excluded from compression (refs render `BLOCKED`). For low-frequency, high-value tools with independent outputs — see the ⚠ note below. |
+| `protectedLatestTools` | string\[\] | `none` | 🟢 ACTIVE | Tool-name patterns (glob suffix allowed) whose **latest** call+result pair is hard-excluded from compression; older pairs remain compressible. For cumulative-snapshot tools. |
 | `throttleRetry` | boolean \| object | `true` | 🟢 ACTIVE | Auto-retry provider token rate-limit errors with progressive backoff. |
 | `repetitionGuard` | boolean \| object | `true` | 🟢 ACTIVE | Break infinite loops of byte-identical tool calls (warn at 3 consecutive, block + abort at 5). |
 | `degenerationGuard` | boolean \| object | `true` | 🟢 ACTIVE | Collapse degenerate single-codepoint runs (e.g. 4655×「【」) in assistant text/thinking of the outgoing view and inject a one-shot recovery notice — breaks the abort loop where pi replays degenerated thinking back to the provider on every request (#351). |
@@ -202,7 +204,7 @@ All keys below are currently **ACTIVE**.
 | `PI_ACP_DELEGATE_ASYNC_TIMEOUT_MINUTES` | Override `delegate.asyncTimeoutMinutes`; `0` disables the async hard limit. |
 | `PI_ACP_DELEGATE_FORCE_ENABLE` | Override `delegate.forceEnable`; takes `true` / `false`. |
 
-> **Only the documented keys are read from `acp.json`.** Other tuning knobs (`preserveRecentMessages`, `protectedTools`) are code-level and not user-overridable. The three compression thresholds form a three-tier escalation: growth-driven soft nudges → forced nudges at `compress.maxContextLimit` → emergency truncation at `compress.emergencyThresholdPercent`.
+> **Only the documented keys are read from `acp.json`.** Other tuning knobs (`preserveRecentMessages`) are code-level and not user-overridable. The three compression thresholds form a three-tier escalation: growth-driven soft nudges → forced nudges at `compress.maxContextLimit` → emergency truncation at `compress.emergencyThresholdPercent`.
 
 ---
 
@@ -236,7 +238,7 @@ All keys below are currently **ACTIVE**.
 - **Type:** `number`
 - **Default:** *(auto)* — the model's `contextWindow` read live each turn
 - **Status:** 🟢 ACTIVE
-- **Description:** Override the context limit, in tokens. By default the limit is read from the active model's `ctx.model.contextWindow` on every turn, so it stays correct when you switch models. Set an explicit value for deterministic test runs or headless/non-interactive sessions where the model metadata may be unavailable. The `ACP_MODEL_CONTEXT_LIMIT` environment variable takes precedence over this value.
+- **Description:** Override the context limit, in tokens. By default the limit is read from the active model's `ctx.model.contextWindow` on every turn, so it stays correct when you switch models. Set an explicit value for deterministic test runs or headless/non-interactive sessions where the model metadata may be unavailable. The `ACP_MODEL_CONTEXT_LIMIT` environment variable takes precedence over this value. Note this value is also the **denominator of all percentage compression thresholds** (`maxContextLimit`, `emergencyThresholdPercent`) — lowering it moves every trigger point down proportionally. To keep day-to-day context small without shrinking this denominator, see [Soft target with elastic headroom](#soft-target-with-elastic-headroom-1122).
 
 ### `outputHeadroomMaxPct`
 
@@ -258,6 +260,21 @@ All keys below are currently **ACTIVE**.
 - **Default:** `50000`
 - **Status:** 🟢 ACTIVE
 - **Description:** A hard byte cap (~50 KB, roughly 1250 lines) applied to tool result text via the `tool_result` hook. Aligned with Pi's own bash/read/grep cap so every tool path lands under one ceiling; the net still catches runaway output from tools Pi does not cap (MCP/custom). When the cap fires, the oversized text is head-truncated with a notice telling the model how to see the full output. Set higher for large MCP outputs, lower (e.g. `8192`) for a tighter context budget, or set to `0` to disable the cap entirely.
+
+### `protectedTools`
+
+- **Type:** `string[]`
+- **Default:** `none` (empty)
+- **Status:** 🟢 ACTIVE
+- **Description:** Tool-name patterns (glob suffix allowed, e.g. `"skill"`, `"read_*"`) whose **every** call+result pair is hard-excluded from compression: matching refs render as `BLOCKED` in every view, in both compression modes and across all wires. Intended for low-frequency, high-value tools whose outputs are **independent content** rather than cumulative snapshots (e.g. opencode/pi `skill` loads, one-shot references). Malformed values (non-array, empty array, non-string or blank entries) are rejected with a loud warning and ignored — they never fail the session.
+- **⚠ When to use which knob:** protecting ALL instances of a chatty tool grows context unboundedly — never put high-frequency tools here. Independent-content tools → `protectedTools`; cumulative-snapshot tools (each call supersedes the last) → `protectedLatestTools`; chatty tools → neither (rely on the soft recent-zone instead). Rule of thumb: if you would be annoyed to keep every single output forever, do not protect it fully.
+
+### `protectedLatestTools`
+
+- **Type:** `string[]`
+- **Default:** `none` (empty)
+- **Status:** 🟢 ACTIVE
+- **Description:** Tool-name patterns (glob suffix allowed) whose **latest** call+result pair is hard-excluded from compression (matching refs render as `BLOCKED`); older pairs remain compressible. Intended for cumulative-snapshot tools where each call supersedes the last. Same validation rules as `protectedTools`. See the ⚠ note under `protectedTools` for when to use which knob.
 
 ---
 
@@ -628,6 +645,33 @@ The flow is:
 - **Default:** `"default"`
 - **Status:** 🟢 ACTIVE
 - **Description:** Selects a **prompt pack** — a named bundle of surface overrides (prompt sections, nudge sections, tool prompts, delegate prompt, compression rules) applied as the base layer under your inline `acp.json` overrides. Resolved through the same three-level cascade as every other `compress.*` field: `models > providers > global`, per active model, per turn. See [Prompt Packs](#prompt-packs) for the full reference and the built-in `lean` pack.
+
+### Soft target with elastic headroom (#1122)
+
+Keeping day-to-day context small is a **cost target**, not a window size. The common misconfiguration behind [billion-context#1122](https://github.com/ranxianglei/billion-context/issues/1122) is setting `modelContextLimit` below the model's native window to express that target — e.g., a 70k limit on a 200k model "to keep things around 40k". Because every percentage threshold is measured against `modelContextLimit`, this anchors *all* triggers to the shrunken value: forced nudges start at 75% of 70k ≈ 52.5k, and lossy emergency truncation fires at ~66.5k — so a legitimate task that genuinely needs 80k of context gets compressed, and eventually truncated, mid-task.
+
+The recipe: keep the denominator at the true window and express the cost target through the existing soft threshold instead.
+
+```jsonc
+{
+  // "modelContextLimit": 200000,   // optional — omit to follow Pi's live model catalog
+  "compress": {
+    "maxContextLimit": "35%"        // soft target ≈ 70k on a 200k window (= target ÷ native window)
+  }
+}
+```
+
+How compression actually gets triggered (three layers):
+
+1. **Growth layer** (day-to-day driver) — **absolute tokens, independent of `modelContextLimit` by design**: a soft nudge fires once cumulative growth since the last anchor (session start / last compress / post-shrink reset) passes the cadence floor (`max(20k, 45% × nudgeGrowthTokens)` ≈ 22.5k by default), provided there is enough effective compressible content (~`nudgeGrowthTokens`). Keeping the window large does NOT delay this layer.
+2. **Pressure layer** — the only %-anchored part: `usage ≥ maxContextLimit` (default 75%) → forced nudge every turn; ≥ 95% → emergency truncation. Scales with `modelContextLimit`.
+3. **Qualification layer** — kernel default 45%, not exposed here; gates only the turn-1 cold-start ticket and T2/T3 block-count escalation.
+
+Notes:
+
+- Setting `maxContextLimit` below 45% works correctly (the layers gate independent paths), but acp-kernel logs one validation warning per turn — log noise only, thresholds unaffected (tracked in acp-kernel#346).
+- Behavior delta vs the old low-limit config: the forced zone moves from 75%×old-limit up to chosen-%×native-window, and emergency truncation moves from ~95%×old-limit back to the true edge (~95%×native). Between the growth anchors and the forced zone, context may drift below your target — that drift is the price of elasticity. A strict ceiling *and* burst headroom simultaneously needs structure-aware compression ([billion-context#344](https://github.com/ranxianglei/billion-context/issues/344)), not a smaller denominator.
+- All of this resolves through the three-level cascade below (`models > providers > global`), so different targets can coexist across models.
 
 ### `compress.providers` — per-provider & per-model overrides
 

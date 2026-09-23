@@ -26,6 +26,7 @@ import type { NudgeSectionsConfig } from "./surface.js";
 import { coreOutToAgentMessages, extractText } from "./messages.js";
 import { liveOnlyTail } from "./live-only-tail.js";
 import { carryHostSystemMessages } from "./system-passthrough.js";
+import { sanitizeToolPairing } from "./tool-pair-sanitizer.js";
 import { countThinkingChars, dropCompressReasoning } from "./reasoning-drop.js";
 import { collapseAssistantDegeneration, degenerationNotice, lastAssistantRuns, resolveDegenerationGuard } from "./degeneration.js";
 import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
@@ -794,6 +795,18 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
     if (withHostSystem !== rebuilt) {
       rebuilt = withHostSystem;
       logInfo("system-passthrough", { sid, event: "carried", systems: event.messages.filter((m) => (m as { role?: unknown }).role === "system").length, outMsgs: rebuilt.length });
+    }
+
+    // [#505] drop orphaned tool results created by compression folding away a
+    // matching call (an orphan result would 400 upstream). Gated on compression
+    // having occurred: a non-compressed branch can legitimately begin at a
+    // toolResult whose originating call is not in view, and must not be touched.
+    if (turn.state.blocks.length > 0) {
+      const sanitized = sanitizeToolPairing(rebuilt);
+      if (sanitized.droppedResults.length > 0) {
+        rebuilt = sanitized.messages;
+        logWarn("tool-pair-sanitize", { sid, event: "dropped-orphan-results", count: sanitized.droppedResults.length, droppedResults: sanitized.droppedResults });
+      }
     }
 
     // Always return the transformed array: every message needs its [mNNNNN] ref

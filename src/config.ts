@@ -236,7 +236,18 @@ export interface AdapterConfig {
   /** When omitted, the adapter reads `ctx.model.contextWindow` live each turn.
    *  Set explicitly for tests/headless runs. */
   modelContextLimit?: number;
+  /** Tool-name patterns (glob suffix allowed) whose EVERY call+result pair is
+   *  hard-excluded from compression — matching refs render as BLOCKED in every
+   *  view. Default: none. Intended for low-frequency high-value tools whose
+   *  outputs are independent content (e.g. skill loads); do NOT use for chatty
+   *  tools — protecting every instance grows context unboundedly (#639
+   *  rationale). Settable via acp.json since #499. */
   protectedTools?: string[];
+  /** Tool-name patterns (glob suffix allowed) whose LATEST call+result pair is
+   *  hard-excluded from compression; older pairs remain compressible. Default:
+   *  none. Intended for cumulative-snapshot tools where each call supersedes
+   *  the last. Settable via acp.json since #499. */
+  protectedLatestTools?: string[];
   preserveRecentMessages?: number;
   /** Check npm for a newer billion-context-pi on startup and auto-install it. Default: true.
    *  Disable via `autoUpdate: false` or env `ACP_AUTO_UPDATE=0` to avoid all
@@ -538,6 +549,7 @@ export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number, 
           : FALLBACK_LIMIT;
   const config = defaultConfig(limit, {
     protectedTools: adapter.protectedTools ?? [],
+    protectedLatestTools: adapter.protectedLatestTools ?? [],
     preserveRecentMessages: adapter.preserveRecentMessages ?? 5,
     ...adapter.coreOverrides,
   });

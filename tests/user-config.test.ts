@@ -223,3 +223,61 @@ test("applyUserConfig supports all user config keys", () => {
   assert.equal(result.toolOutputMaxBytes, 100_000);
   assert.equal(result.outputHeadroomMaxPct, 0.1);
 });
+
+test("loadUserConfig picks up protection keys from acp.json", async () => {
+  const tmpDir = path.join(os.tmpdir(), `acp-test-protect-${Date.now()}`);
+  await fs.mkdir(tmpDir, { recursive: true });
+  try {
+    await writeConfig(tmpDir, { protectedTools: ["skill"], protectedLatestTools: ["read_*"] });
+    const config = await loadUserConfig(tmpDir);
+    assert.deepEqual(config.protectedTools, ["skill"]);
+    assert.deepEqual(config.protectedLatestTools, ["read_*"]);
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("applyUserConfig lets user protection keys override adapter values", () => {
+  const adapter: AdapterConfig = { protectedTools: ["read"], protectedLatestTools: ["write"] };
+  const user = { protectedTools: ["skill"], protectedLatestTools: ["grep_*"] };
+  const result = applyUserConfig(adapter, user);
+  assert.deepEqual(result.protectedTools, ["skill"], "user protectedTools wins");
+  assert.deepEqual(result.protectedLatestTools, ["grep_*"], "user protectedLatestTools wins");
+});
+
+test("applyUserConfig keeps adapter protection values when user does not set them", () => {
+  const adapter: AdapterConfig = { protectedTools: ["read"], protectedLatestTools: ["write"] };
+  const result = applyUserConfig(adapter, {});
+  assert.deepEqual(result.protectedTools, ["read"]);
+  assert.deepEqual(result.protectedLatestTools, ["write"]);
+});
+
+test("applyUserConfig trims protection entries", () => {
+  const result = applyUserConfig({}, { protectedTools: [" skill ", "skill_*"] });
+  assert.deepEqual(result.protectedTools, ["skill", "skill_*"]);
+});
+
+test("malformed protection values in acp.json warn and fall back instead of failing", async () => {
+  const tmpDir = path.join(os.tmpdir(), `acp-test-badprotect-${Date.now()}`);
+  await fs.mkdir(tmpDir, { recursive: true });
+  try {
+    for (const body of [
+      '{ "protectedTools": "skill" }',
+      '{ "protectedTools": [] }',
+      '{ "protectedTools": [42] }',
+      '{ "protectedTools": [" "] }',
+      '{ "protectedTools": null }',
+      '{ "protectedLatestTools": "read" }',
+    ]) {
+      const cfgDir = path.join(tmpDir, CONFIG_DIR_NAME);
+      await fs.mkdir(cfgDir, { recursive: true });
+      await fs.writeFile(path.join(cfgDir, "acp.json"), body, "utf8");
+      const user = await loadUserConfig(tmpDir);
+      const result = applyUserConfig({ protectedTools: ["fallback"], protectedLatestTools: ["fallback*"] }, user);
+      assert.deepEqual(result.protectedTools, ["fallback"], `malformed ${body} falls back to adapter value`);
+      assert.deepEqual(result.protectedLatestTools, ["fallback*"], `malformed ${body} leaves other key untouched`);
+    }
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});

@@ -8,6 +8,14 @@
 
 ---
 
+## 社区
+
+QQ群:
+1056132097(已满)
+1108730198(未满)
+
+---
+
 ## 📄 论文 / 预印本
 
 - **[模型驱动的分层增量压缩:面向长寿命编码 Agent 的免训练多代上下文管理](./paper/模型驱动的分层增量压缩-免训练多代上下文管理.md)**(中文版,v0.2)
@@ -31,12 +39,6 @@
 ---
 
 > **宿主支持:** 本插件面向 **Pi**。它**不支持 OMP(oh-my-pi)** —— 在 OMP 宿主上会拒绝运行。OMP 用户请直接改用 [billion-context](https://github.com/ranxianglei/billion-context)(启动命令 bili omp);其他客户端的完整对照见[该选哪个?](#该选哪个)。OMP 详细说明:[docs/omp.zh-CN.md](./docs/omp.zh-CN.md)。
-
-## 社区
-
-交流、求助与更新都在 QQ——同一个群覆盖三个项目(`billion-context`、`billion-context-pi`、`opencode-acp`):
-
-**QQ 群:1056132097**
 
 ## 为什么选择 billion-context
 
@@ -240,11 +242,12 @@ grep '\[error\]' ~/.pi/acp.log        # 汇总所有记录的失败
 
 ### 哪些内容会被保护
 
-billion-context 保护三类内容不被压缩:
+billion-context 保护四类内容不被压缩:
 
 1. **永久保护的工具** — `compress` 调用被硬保护(它们是承载关键元数据的;压缩它们会破坏 decompress 和"摘要是历史"的契约)。
 2. **软近期区** — 最后 N 条消息(默认 5)和最后约 5K token 被软保护,让模型保留工作集。来自 `decompress`、`search_context`、`read`、`bash` 的工具结果被**排除**出此区:它们体量大、消费后就该能压缩,所以不该占用保护预算。
 3. **最后一条用户消息** — 始终保护(用户意图必须存活)。
+4. **用户配置的工具保护** — `acp.json` 中的 `protectedTools` / `protectedLatestTools` 硬排除匹配的工具 call+result(全历史 vs 仅最近一次;见 [CONFIGURATION.zh-CN.md](./CONFIGURATION.zh-CN.md))。
 
 ## 会话存储与迁移
 

@@ -10,6 +10,14 @@ The model decides <em>when</em> and <em>what</em> to compress — not a hard lim
 
 ---
 
+## Community
+
+QQ Group:
+1056132097 (full)
+1108730198 (open)
+
+---
+
 ## 📄 Paper / Preprint
 
 - **[Model-Driven Incremental Hierarchical Compression: Training-Free Multi-Generational Context Management for Long-Lived Coding Agents](./paper/model-driven-incremental-hierarchical-compression-training-free-multi-generational-context-management-for-long-lived-coding-agents.md)** (English, v0.2)
@@ -33,12 +41,6 @@ A production-scale longitudinal study: 4.5 months, three hosts, 174,327 model ca
 ---
 
 > **Host support:** this plugin is for **Pi**. It does **not** support **OMP (oh-my-pi)** — on an OMP host it refuses to run. OMP users: use [billion-context](https://github.com/ranxianglei/billion-context) instead (`bili omp`, built-in plugin). Full client → package table: see [Which do I need?](#which-do-i-need); OMP details: [docs/omp.md](./docs/omp.md).
-
-## Community
-
-Discussion, help, and updates on QQ — one group covers all three projects (`billion-context`, `billion-context-pi`, `opencode-acp`):
-
-**QQ Group: 1056132097**
 
 ## Why?
 
@@ -251,11 +253,12 @@ The model receives detailed guidance (in its system prompt) on **when** to compr
 
 ### What gets protected
 
-billion-context protects three categories of content from compression:
+billion-context protects four categories of content from compression:
 
 1. **Always-protected tools** — `compress` calls are hard-protected (they're load-bearing metadata; compressing them breaks decompress and the "summary is historical" contract).
 2. **Soft recent-zone** — the last N messages (default 5) and last ~5K tokens are soft-protected so the model keeps its working set. Tool results from `decompress`, `search_context`, `read`, and `bash` are **excluded** from this zone: they're large and meant to be compressible once consumed, so they don't eat the protected budget.
 3. **Last user message** — always protected (user intent must survive).
+4. **User-configured tool protection** — `protectedTools` / `protectedLatestTools` in `acp.json` hard-exclude matched tool calls+results (full history vs. latest-only; see [CONFIGURATION.md](./CONFIGURATION.md)).
 
 ## Session storage & migration
 

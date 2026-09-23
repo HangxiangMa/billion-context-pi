@@ -18,6 +18,8 @@ export interface UserAcpConfig {
   debug?: boolean;
   autoUpdate?: boolean;
   modelContextLimit?: number;
+  protectedTools?: string[];
+  protectedLatestTools?: string[];
   toolBashDefaultTimeout?: number;
   toolOutputMaxBytes?: number;
   delegate?: boolean | DelegateConfig;
@@ -133,6 +135,7 @@ function join(... parts: string[]): string {
 
 const KNOWN = new Set([
   "enabled", "debug", "autoUpdate", "modelContextLimit",
+  "protectedTools", "protectedLatestTools",
   "toolBashDefaultTimeout", "toolOutputMaxBytes",
   "delegate", "compress", "displayUsage", "throttleRetry",
   "outputHeadroomMaxPct",
@@ -151,13 +154,31 @@ function pickKnown(parsed: Record<string, unknown>): UserAcpConfig {
 }
 
 /** Merge user config onto an adapter config: user config wins for the keys it
- *  sets. Used at session_start to apply runtime-discovered config. */
+ *  sets. Used at session_start to apply runtime-discovered config. The two
+ *  protection keys are shape-checked here because acp.json is hand-edited JSON
+ *  and a malformed value must warn + fall back, never fail the session or feed
+ *  garbage to the kernel (#499). */
 export function applyUserConfig(adapter: AdapterConfig, user: UserAcpConfig): AdapterConfig {
-  return {
+  const result: AdapterConfig = {
     ...adapter,
     ...user,
     coreOverrides: adapter.coreOverrides,
-    protectedTools: adapter.protectedTools,
     preserveRecentMessages: adapter.preserveRecentMessages,
   };
+  for (const key of ["protectedTools", "protectedLatestTools"] as const) {
+    if (!(key in user)) continue;
+    const cleaned = cleanProtectionList(key, user[key]);
+    if (cleaned !== undefined) result[key] = cleaned;
+    else if (adapter[key] !== undefined) result[key] = adapter[key];
+    else delete result[key];
+  }
+  return result;
+}
+
+function cleanProtectionList(key: string, value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length === 0 || !value.every((v) => typeof v === "string" && v.trim() !== "")) {
+    console.warn(`[bcp] acp.json "${key}" must be a non-empty array of non-empty strings — ignoring the value`);
+    return undefined;
+  }
+  return value.map((v) => v.trim());
 }
