@@ -113,3 +113,24 @@ test("idempotent: a second pass over cleaned output is a no-op (same reference)"
   assert.equal(twice.messages, once.messages, "already-cleaned stream must keep its reference");
   assert.deepEqual(twice.droppedResults, []);
 });
+
+function bareToolResult(toolCallId?: unknown): AgentMessage {
+  const m: Record<string, unknown> = { role: "toolResult", toolName: "bash", content: [{ type: "text", text: "x" }], isError: false, timestamp: 0 };
+  if (toolCallId !== undefined) m.toolCallId = toolCallId;
+  return m as unknown as AgentMessage;
+}
+
+test("toolResult with no toolCallId field is dropped (invalid upstream on its own)", () => {
+  const input = [user("go"), bareToolResult()];
+  const out = sanitizeToolPairing(input);
+  assert.deepEqual(roles(out.messages), ["user"]);
+  assert.deepEqual(out.droppedResults, ["(missing toolCallId)"]);
+});
+
+test("non-string / empty toolCallId is dropped while a valid pair survives", () => {
+  const input = [user("go"), assistant([call("a")]), toolResult("a"), bareToolResult(42), bareToolResult("")];
+  const out = sanitizeToolPairing(input);
+  assert.deepEqual(roles(out.messages), ["user", "assistant", "toolResult"]);
+  assert.deepEqual((out.messages[2] as { toolCallId: string }).toolCallId, "a");
+  assert.deepEqual(out.droppedResults, ["(missing toolCallId)", "(missing toolCallId)"]);
+});
