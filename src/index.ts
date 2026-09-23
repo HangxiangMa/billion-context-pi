@@ -19,7 +19,7 @@ import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeCacheTool } from "./cache-tool.js";
-import { makeDelegateTool, makeDelegateWaitTool, makeDelegateStatusTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage, setDelegatePolicy, setDelegateDefaults, setDelegateNotifyIfRead, markDelegateResultRead, markDelegateRunReadByCommand } from "./delegate-tool.js";
+import { cancelDelegateRun, fleetRunsSnapshot, guideDelegate, makeDelegateTool, makeDelegateWaitTool, makeDelegateStatusTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage, setDelegatePolicy, setDelegateDefaults, setDelegateNotifyIfRead, markDelegateResultRead, markDelegateRunReadByCommand } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
 import { mergeSurface, readToolSurfaceWithPacks, resolveActivePack, resolvePackName, surfaceMetaOf } from "./prompt-pack.js";
 import type { NudgeSectionsConfig } from "./surface.js";
@@ -66,10 +66,37 @@ export { deriveChildState } from "./state.js";
 
 type AgentMessage = SessionMessageEntry["message"];
 
+type TaskDockGlobal = typeof globalThis & {
+	__piMineTaskDockRuns?: () => Array<{
+		id: string;
+		source: string;
+		label: string;
+		state: "running" | "done" | "error" | "waiting";
+		startedAt: number;
+		detail?: string;
+		summary?: string;
+		activity?: string;
+		tokens?: { input: number; output: number };
+	}>;
+	__piMineTaskDockControl?: (request: { id: string; action: "cancel" | "guide"; guidance?: string }) => void;
+};
+
 declare const CURRENT_VERSION: string;
 
 export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactory {
   return (pi: ExtensionAPI) => {
+    const taskDockGlobal = globalThis as TaskDockGlobal;
+    taskDockGlobal.__piMineTaskDockRuns = () => fleetRunsSnapshot().map((run) => ({
+      id: `delegate:${run.runId}`,
+      source: "delegate",
+      label: run.agent,
+      state: run.status === "completed" ? "done" : run.status === "failed" ? "error" : "running",
+      startedAt: run.startedAt,
+      detail: run.task,
+      summary: run.status === "running" ? undefined : `${run.status} · ${run.exitLabel}`,
+      activity: run.timedOut ? `timed out: ${run.timedOut}` : undefined,
+      tokens: run.usage ? { input: run.usage.input, output: run.usage.output } : undefined,
+    }));
     if (process.env.BILLION_CONTEXT_PROXY) {
       console.log("[bcp] disabled: BILLION_CONTEXT_PROXY detected — proxy handles compression");
       return;
@@ -219,6 +246,18 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
   let forkWarned = false;
   let subagentStandDownWarned = false;
   pi.on("session_start", async (_event, ctx) => {
+    (globalThis as TaskDockGlobal).__piMineTaskDockControl = ({ id, action, guidance }) => {
+      const runId = id.startsWith("delegate:") ? id.slice("delegate:".length) : id;
+      if (action === "cancel") {
+        cancelDelegateRun(runId);
+        return;
+      }
+      if (guidance?.trim()) {
+        void guideDelegate(pi, ctx, runId, guidance).catch((error) =>
+          logWarn("delegate", { event: "fleet-guide-failed", runId, error: String(error) }),
+        );
+      }
+    };
     // Unsupported hosts stand down (#234 / #364): any host without Pi's
     // buildContextEntries() API is refused unless it declared itself a
     // Pi-compatible fork via PI_ACP_FORK_HOST=1. OMP (oh-my-pi) stays blocked
