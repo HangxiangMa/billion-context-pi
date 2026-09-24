@@ -55,6 +55,7 @@ import { FORK_HOST_WARNING_MESSAGE, UNSUPPORTED_HOST_MESSAGE } from "./omp.js";
 import { isDeclaredForkHost, isUnsupportedHost } from "./host.js";
 import { isBiliProxyBaseUrl, PROXY_STAND_DOWN_MESSAGE, nativeStandDownMessage } from "./proxy-detect.js";
 import { findPiSubagentsInstalls, resolveAgentDir, DELEGATE_STAND_DOWN_MESSAGE } from "./setup-subagent-tools.js";
+import { shouldAcpOwnCompaction } from "./compaction-gate.js";
 
 // Host-facing API for multi-session hosts (docs/host-adapter.md, #367): the
 // extension keeps its own runtime instance private; hosts build their own via
@@ -213,8 +214,8 @@ function userConfigDisabled(cwd: string): boolean {
 // opencode-acp requiring opencode's compaction.auto = false). On a refused host
 // (OMP) we stand down and let the host compact normally instead.
 function wireCompactionDisable(pi: ExtensionAPI, runtime: AcpRuntime): void {
-  pi.on("session_before_compact", () => {
-    if (runtime.refused) return;
+  pi.on("session_before_compact", (_event, ctx) => {
+    if (runtime.refused || !shouldAcpOwnCompaction(ctx)) return;
     return { cancel: true };
   });
 }

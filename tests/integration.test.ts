@@ -87,6 +87,25 @@ test("session_before_compact cancels Pi's auto-compaction", () => {
   assert.deepEqual(result, { cancel: true });
 });
 
+test("session_before_compact leaves QGenie's 1M Anthropic endpoint to Pi", () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension()(api as any);
+  const compact = handlers.get("session_before_compact")![0]!;
+  const result = compact({}, {
+    model: {
+      provider: "qgenie",
+      id: "anthropic::claude-4-6-sonnet:1M",
+      contextWindow: 1_000_000,
+    },
+  });
+  assert.equal(result, undefined);
+
+  const regular = compact({}, {
+    model: { provider: "qgenie", id: "anthropic::claude-4-6-sonnet", contextWindow: 200_000 },
+  });
+  assert.deepEqual(regular, { cancel: true });
+});
+
 test("before_agent_start appends the ACP system prompt", () => {
   const { api, handlers } = captureApi();
   createAcpExtension()(api as any);
