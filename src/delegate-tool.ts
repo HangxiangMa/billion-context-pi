@@ -1412,8 +1412,8 @@ async function runDelegate(
       });
       run.child = child;
       let settled = false;
-      // Watchdogs: idle (no output), EOF grace, hard limit. A stuck child holds
-      // its stdout fd open so stdout EOF never fires — idle is the main defense.
+      // Watchdogs: idle (no child output), EOF grace, hard limit. A stuck child
+      // holds its stdout fd open so stdout EOF never fires — idle is the main defense.
       const watchdog = attachWatchdogs(
         child,
         {
@@ -1460,7 +1460,6 @@ async function runDelegate(
         { reply: replyStream, activity: activityStream },
       );
       child.stdout?.on("data", (c: Buffer) => {
-        watchdog.poke();
         if (useJsonStream) {
           if (streamOverflow) return;
           stdoutBuf += c.toString("utf8");

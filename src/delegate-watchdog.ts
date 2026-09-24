@@ -37,13 +37,13 @@ export interface WatchdogHandle {
 }
 
 /**
- * Guarantees a hung child process gets killed. A stuck child holds its stdout
- * fd open, so stdout EOF never fires — hence the idle timer (no output for
- * idleMs) is the main defense; the hard time limit and the EOF grace period
- * cover the rest. Kill is SIGTERM, escalated to SIGKILL after killGraceMs.
+ * Guarantees a hung child process gets killed. A stuck child holds its output
+ * fds open, so EOF never fires — hence the idle timer (no child output for
+ * idleMs) is the main defense; the hard time limit and EOF grace period cover
+ * the rest. Kill is SIGTERM, escalated to SIGKILL after killGraceMs.
  */
 export function attachWatchdogs(
-  child: { kill(signal: NodeJS.Signals): boolean; stdout: Readable | null },
+  child: { kill(signal: NodeJS.Signals): boolean; stdout: Readable | null; stderr?: Readable | null },
   hooks: WatchdogHooks,
   opts: WatchdogOptions,
 ): WatchdogHandle {
@@ -107,6 +107,12 @@ export function attachWatchdogs(
     timeoutTimer.unref?.();
   }
 
+  // A child can make real progress without writing protocol events to stdout.
+  // Graft/indexing and provider diagnostics commonly use stderr; count that as
+  // activity too so the idle watchdog does not kill a live delegate.
+  child.stdout?.on("data", poke);
+  child.stderr?.on("data", poke);
+
   const onStdoutEnd = (): void => {
     if (hooks.isSettled()) return;
     eofTimer = setTimeout(() => {
@@ -127,6 +133,8 @@ export function attachWatchdogs(
     settledGrace,
     dispose: () => {
       clearTimers();
+      child.stdout?.removeListener("data", poke);
+      child.stderr?.removeListener("data", poke);
       child.stdout?.removeListener("end", onStdoutEnd);
     },
   };

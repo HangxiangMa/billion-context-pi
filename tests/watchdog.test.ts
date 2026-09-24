@@ -7,6 +7,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 interface Harness {
   stdout: EventEmitter;
+  stderr: EventEmitter;
   kills: NodeJS.Signals[];
   reasons: string[];
   eofGraceCount: number;
@@ -17,6 +18,7 @@ interface Harness {
 
 function setup(overrides?: { idleMs?: number | null; timeoutMs?: number | null; killGraceMs?: number; eofGraceMs?: number; initiallySettled?: boolean }): Harness {
   const stdout = new EventEmitter();
+  const stderr = new EventEmitter();
   const kills: NodeJS.Signals[] = [];
   const reasons: string[] = [];
   let eofGraceCount = 0;
@@ -28,6 +30,7 @@ function setup(overrides?: { idleMs?: number | null; timeoutMs?: number | null; 
         return true;
       },
       stdout,
+      stderr,
     },
     {
       isSettled: () => settledFlag,
@@ -45,6 +48,7 @@ function setup(overrides?: { idleMs?: number | null; timeoutMs?: number | null; 
   );
   return {
     stdout,
+    stderr,
     kills,
     reasons,
     get eofGraceCount() {
@@ -81,6 +85,16 @@ test("poke resets the idle timer (continuous output never triggers)", async () =
     h.watchdog.poke();
   }
   assert.equal(h.kills.length, 0, "no kill while output keeps flowing");
+  h.watchdog.dispose();
+});
+
+test("stderr activity resets the idle timer", async () => {
+  const h = setup({ idleMs: 30, timeoutMs: 60_000 });
+  for (let i = 0; i < 4; i++) {
+    await sleep(20);
+    h.stderr.emit("data", Buffer.from("graft progress\\n"));
+  }
+  assert.equal(h.kills.length, 0, "stderr activity keeps a live delegate alive");
   h.watchdog.dispose();
 });
 
