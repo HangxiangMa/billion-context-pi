@@ -319,6 +319,15 @@ export function blockSpanLabel(block: CompressionBlock, state: CompressionState)
   return `${block.blockId}${tierMark}=${span}${star}`;
 }
 
+// #535 P1: one-line integrity fingerprint per new/updated block — cheap
+// head/tail excerpt + char length so the model can verify its summary was
+// stored intact without decompressing.
+export function summaryFingerprintLine(blockId: string, summary: string): string {
+  const head = summary.slice(0, 30).replace(/\r?\n/g, " ");
+  const tail = summary.slice(-100).replace(/\r?\n/g, " ");
+  return ` · ${blockId} summary ${summary.length}ch · head "${head}" … tail "${tail}"`;
+}
+
 function blockHasVisibleAnchor(block: CompressionBlock, visibleIds: Set<string>): boolean {
   if (visibleIds.has(`acp_summary_${block.blockId}`)) return true;
   return block.effectiveMessageIds.some((id) => visibleIds.has(id));
@@ -351,6 +360,25 @@ function refIsDead(ref: string, state: CompressionState, visibleIds: Set<string>
   if (!rawId) return true;
   if (visibleIds.has(rawId)) return false;
   return !hasActiveOwner(state, [rawId], visibleIds);
+}
+
+// #532: classify one failed range boundary for fork-drift attribution.
+// "live": ref resolves to a content-addressed live-* id (unpersisted tail) —
+// host-view churn territory (#459). "unknown": ref absent from the persisted
+// byRef (pruned stale live ref or cross-generation) — also #459 territory.
+// "persistent-dangling": stable-id ref whose message left the sent view
+// (hide-consumed / orphan hiding, acp-kernel#396) — NOT fork drift.
+// "alive": still resolvable; the range failed for another reason.
+function refDriftSignal(ref: string, state: CompressionState, visibleIds: Set<string>): "live" | "unknown" | "persistent-dangling" | "alive" {
+  const trimmed = ref.trim();
+  if (/^b\d+$/i.test(trimmed)) return "alive";
+  const m = trimmed.match(/^m(\d+)$/i);
+  if (!m) return "unknown";
+  const rawId = state.messageRefs.byRef[trimmed] ?? state.messageRefs.byRef[paddedRef(Number(m[1]))];
+  if (!rawId) return "unknown";
+  if (rawId.startsWith("live-")) return "live";
+  if (!visibleIds.has(rawId) && !hasActiveOwner(state, [rawId], visibleIds)) return "persistent-dangling";
+  return "alive";
 }
 
 function compressibleSnapshotText(nudge: NudgeDecision | undefined): string {
@@ -408,7 +436,7 @@ function tier3OnlyRewrite(newBlocks: CompressionBlock[], allBlocks: CompressionB
 // message-type ranges. When the session's actionable mass is tier blocks, name
 // them so repetition-prone models get a concrete next action instead of
 // hunting (and re-hitting the guard).
-function tierReadyHint(state: CompressionState, config: ReturnType<AcpRuntime["configFor"]>): string {
+export function tierReadyHint(state: CompressionState, config: ReturnType<AcpRuntime["configFor"]>): string {
   if (!config.tiers.enabled) return "";
   const active = state.blocks.filter((b) => b.active);
   const first = (bs: CompressionBlock[]) => bs[0]?.blockId ?? "";
@@ -502,6 +530,12 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     beforeMsgCount: messages.length,
     beforeTokens,
   });
+  // #540: select changed blocks by before/after runId diff — every
+  // applyCompression assigns a fresh runId to both NEW and REFOLDED blocks,
+  // while a refold keeps its original array position. A tail slice
+  // (slice(-blocksCreated)) mislabels a non-tail refolded block (e.g. refold
+  // of b1 in [b1,b2,b3] would present b3's stale summary as the new one).
+  const beforeRunIds = new Map(state.blocks.map((b) => [b.blockId, b.runId]));
   const applied = runtime.core.applyCompression({
     ranges: sanitizedRanges.map((r) => ({ startRef: r.startId, endRef: r.endId, summary: r.summary, topic: r.topic ?? topLevelTopic, summaryMaxChars, compressCallId: toolCallId })),
     messages,
@@ -509,8 +543,9 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     config,
   });
   assertNotAborted(signal);
+  const changedBlocks = applied.state.blocks.filter((b) => beforeRunIds.get(b.blockId) !== b.runId);
   const rewriteSpans = applied.result.blocksCreated > 0
-    ? tier3OnlyRewrite(applied.state.blocks.slice(-applied.result.blocksCreated), applied.state.blocks)
+    ? tier3OnlyRewrite(changedBlocks, applied.state.blocks)
     : null;
   if (rewriteSpans) {
     await runtime.save(state, ctx);
@@ -555,7 +590,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   const afterTokens = estimateTokens(afterTurn.messages, collectCoveredMessageIds(applied.state), imageTokens);
   const reclaimed = Math.max(0, beforeTokens - afterTokens);
 
-  const newBlocks = applied.state.blocks.slice(-blocksCreated);
+  const newBlocks = changedBlocks;
   debug.event("compress-out", {
     sid: ctx.sessionManager.getSessionId(),
     blocksCreated,
@@ -588,10 +623,20 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     // ref-resolution failures on a declared fork host mean the host rewrote or
     // shrank its in-flight view (see mergeLiveEntries in runtime.ts). Attribute
     // it in support logs so "does not exist" spam is not misread as model
-    // misbehavior.
+    // misbehavior. #532: only live-*/unresolvable refs implicate the host view;
+    // persistent refs left dangling by sent-view hiding (acp-kernel#396) get
+    // their own event so kernel-side orphan hiding is not counted as #459.
     if (blocksCreated === 0 && isDeclaredForkHost() && !isPiHost(ctx.sessionManager)
       && /does not exist|cannot be anchored|is unknown|unknown refs/i.test(errors.join(" "))) {
-      logWarn("compress", { sid: ctx.sessionManager.getSessionId(), event: "fork-ref-drift-suspected", seeIssue: "#459", errors: errors.slice(0, 3) });
+      const signals = ranges.flatMap((r) => [
+        refDriftSignal(r.startId, state, visibleIds),
+        refDriftSignal(r.endId, state, visibleIds),
+      ]);
+      if (signals.includes("live") || signals.includes("unknown")) {
+        logWarn("compress", { sid, event: "fork-ref-drift-suspected", seeIssue: "#459", errors: errors.slice(0, 3) });
+      } else if (signals.includes("persistent-dangling")) {
+        logWarn("compress", { sid, event: "anchor-rejected-hidden-orphan", errors: errors.slice(0, 3) });
+      }
     }
   }
   if (warnings.length > 0) {
@@ -602,6 +647,9 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     ? `blocks: ${newBlocks.map((b) => blockSpanLabel(b, applied.state)).join(", ")}`
     : "0 blocks";
   const lines = [`▣ ACP | ${formatK(beforeTokens)} → ${formatK(afterTokens)} tokens (~${formatK(reclaimed)} reclaimed, ${spanClause})`];
+  if (blocksCreated > 0) {
+    for (const b of newBlocks) lines.push(summaryFingerprintLine(b.blockId, b.summary));
+  }
   if (warnings.length > 0) lines.push("⚠️ " + warnings.join("; "));
   if (errors.length > 0) lines.push("Errors: " + errors.join("; "));
   // #420: carry the post-compression snapshot so a same-turn follow-up

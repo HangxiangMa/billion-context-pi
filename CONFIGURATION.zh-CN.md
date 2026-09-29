@@ -128,10 +128,13 @@
 | `toolOutputMaxBytes` | number | `50000` | 🟢 ACTIVE | 工具返回文本的硬性字节上限。 |
 | `protectedTools` | string\[\] | `无` | 🟢 ACTIVE | 工具名模式（支持 glob 后缀），其**所有** call+result 对都被硬排除在压缩之外（ref 渲染为 `BLOCKED`）。适用于低频高价值、输出为独立内容的工具——见下方 ⚠ 说明。 |
 | `protectedLatestTools` | string\[\] | `无` | 🟢 ACTIVE | 工具名模式（支持 glob 后缀），仅**最近一次** call+result 对被硬排除在压缩之外；更早的对仍可压缩。适用于累积快照型工具。 |
+| `neverPreserveRecentTools` | string\[\] | 内核内置（`["decompress", "search_context", "read", "bash"]`，需 acp-kernel >= 0.0.92） | 🟢 ACTIVE | 从软保护近期区**移除**的工具名模式，让它们的结果立即可压。默认让 `read`/`bash` 保持可压；只移除 `read`（保留 `decompress`/`search_context`）可解批量读文件的「折叠→重读」死循环。**空数组 `[]` 合法**（最大保护逃生门）。 |
+| `preserveRecentTools` | string\[\] | 未设置（不做减法；需 `acp-kernel` >= 0.0.93） | 🟢 ACTIVE | `neverPreserveRecentTools` 的**正向配对**：从内核计算的生效排除表中**移除**的工具名模式 —— 单条 `["read"]` 即 #1198/#1277 的解法，无需重述内置列表。**空数组 `[]` 不合法**（纯无操作，是 `neverPreserveRecentTools: []` 的笔误）。 |
 | `throttleRetry` | boolean \| object | `true` | 🟢 ACTIVE | 自动重试 provider 侧 token 限流错误（递进退避）。 |
 | `repetitionGuard` | boolean \| object | `true` | 🟢 ACTIVE | 打断字节级完全相同的工具调用死循环（连续 3 次告警，连续 5 次拦截并中止本轮）。 |
 | `degenerationGuard` | boolean \| object | `true` | 🟢 ACTIVE | 折叠出站视图中 assistant text/thinking 里的单字符退化连击（如 4655×「【」）并注入一次性恢复通知——打破 pi 每轮请求都回传退化 thinking 导致的连环 abort 死循环（#351）。 |
 | `hostSession` | boolean \| object | `false` | 🟢 ACTIVE | 多会话宿主的回合边界策略：是否把注入的 `custom_message` 计为回合起点。默认关闭（pi 原生行为）。 |
+| `rules` | boolean | `false` | 🟢 ACTIVE | 注册可选的 `acp_rule` 记录工具：简短、原则性的提醒，硬保护免于压缩。默认关闭。 |
 
 **delegate 键**
 
@@ -186,7 +189,7 @@
 |----|------|--------|------|------|
 | `prompts` | object | *(内核默认)* | 🟢 ACTIVE | 覆盖 acp-kernel 的 4 条承重压缩提示词规则。每个设置的字段逐字替换默认值。 |
 | `acknowledgePromptsRisk` | boolean | `false` | 🟢 ACTIVE | 必须为 `true`，`prompts` 覆盖才会生效；否则覆盖被丢弃、使用默认值。 |
-| `promptSections` | object | *(内置默认)* | 🟢 ACTIVE | 覆盖 ACP 系统提示词的 13 个段（含 4 个压缩规则块）（三态：字符串=替换 / null=删除 / 省略=默认）。不经风险门禁。 |
+| `promptSections` | object | *(内置默认)* | 🟢 ACTIVE | 覆盖 ACP 系统提示词的 13 个段，统一三态：字符串=替换 / null=删除 / 省略=默认。不经风险门禁。 |
 | `nudgeSections` | object | *(内置默认)* | 🟢 ACTIVE | 覆盖压缩提示的 4 段引导类文本（efficiencyNote / emergencyHeader / t2Guidance / t3Guidance），同样三态。不经风险门禁。 |
 | `toolPrompts` | object | *(内置默认)* | 🟢 ACTIVE | 覆盖四个 ACP 工具的 LLM 文案（description / paramDescriptions / promptSnippet / promptGuidelines）。扩展加载时同步读取，改后需重启 pi。 |
 | `delegatePrompt` | string \| null | *(内置附录)* | 🟢 ACTIVE | 替换（string）或删除（null）delegate 启用时的 ACP_DELEGATE_NOTIFICATIONS 系统提示词附录。 |
@@ -271,6 +274,45 @@
 - **默认值：** `无`（空）
 - **状态：** 🟢 ACTIVE
 - **说明：** 工具名模式（支持 glob 后缀）——仅匹配的**最近一次** call+result 对被硬排除在压缩之外（ref 渲染为 `BLOCKED`），更早的对仍可压缩。适用于每次调用取代上一次的累积快照型工具。校验规则与 `protectedTools` 相同。何时用哪个旋钮见 `protectedTools` 下的 ⚠ 说明。
+
+### `neverPreserveRecentTools`
+
+- **类型：** `string[]`（工具名模式，支持 glob 后缀）
+- **默认值：** 未设置 → 内核内置 `["decompress", "search_context", "read", "bash"]`（需 `acp-kernel` >= 0.0.92）
+- **状态：** 🟢 ACTIVE
+- **说明：** 从软保护近期区（`preserveRecentMessages` 窗口）中**排除**的工具名模式：匹配的工具结果在近期窗口内立即可压缩，不再等待超龄。内核内置让 `read`/`bash` 保持可压（它们是最大的可回收体量）—— 但正是这个默认让批量读文件的工作流把刚读的文件立刻折掉，陷入「折叠→重读」死循环（上游 billion-context #1198/#1277）。**推荐解法 —— 只移除 `read`：**
+
+  ```json
+  { "neverPreserveRecentTools": ["decompress", "search_context", "bash"] }
+  ```
+
+  这样新读的文件留在近期区，之后按位置超龄回归可压（不同于 `protectedLatestTools` 会把最新一次 read 永久钉住，也不同于 `protectedTools` 会永不折叠任何 read）。**请保留 `decompress`/`search_context` 在列表里**：重新纳入它们会把刚恢复的大块内容钉死在近期区无法回收 —— 换一种病。**⚠ 空数组 `[]` 在这里合法**（与两个保护旋钮不同）：它什么都不排除，让所有工具都获得近期区保护 —— 最大保护逃生门。显式数组逐字替换默认列表。除非确实需要逐字替换语义，优先用下面更简单的正向形式。
+
+### `preserveRecentTools`
+
+- **类型：** `string[]`（工具名模式，支持 glob 后缀）
+- **默认值：** 未设置 → 不做减法（`neverPreserveRecentTools` ?? 内核内置列表逐字生效；需 `acp-kernel` >= 0.0.93）
+- **状态：** 🟢 ACTIVE
+- **说明：** `neverPreserveRecentTools` 的**正向配对旋钮**：从生效的近期区排除列表中**移除**的工具名模式。生效排除表 = `(neverPreserveRecentTools ?? 内置) 减 preserveRecentTools`，由内核计算 —— 因此 #1198/#1277 批量读文件「折叠→重读」死循环的解法只需一条：
+
+  ```json
+  { "preserveRecentTools": ["read"] }
+  ```
+
+  既不用重述（也不用冻结一份很快过时的手抄）内置列表，还自动跟随内置列表演进。可与显式 `neverPreserveRecentTools` 组合（减法同样作用于显式列表）；通配后缀模式移除匹配项（`"bash*"` 移除 `bash`）。**⚠ 空数组 `[]` 在这里不合法** —— 它是纯无操作，裸 `[]` 几乎必然是 `neverPreserveRecentTools: []`（最大保护逃生门）的笔误；畸形值告警并回退到 adapter 值。
+
+---
+
+## 规则
+
+`rules` 键控制 `acp_rule` 记录工具 —— 一个可选机制，把简短、原则性的提醒持久化在会话里，使其穿越上下文压缩。
+
+### `rules`
+
+- **类型：** `boolean`
+- **默认值：** `false`
+- **状态：** 🟢 ACTIVE
+- **说明：** 为 `true` 时，在会话启动时注册 `acp_rule` 工具。传入一条简短的提醒即记录（回显 `Recorded ruleN: …`）；不带参数调用则列出全部已记录规则。规则保存在会话 ACP 状态旁路文件中（重启后保留），并**硬保护免于压缩** —— 即使周围内容全部被压缩，其工具调用与结果仍保持可见。不涉及系统提示词：使用引导完全写在工具描述里，每轮不做任何重新注入。校验错误（空/超长/重复/超限）原样返回给模型。默认上限：最多 50 条 × 每条 300 字符。
 
 ---
 
@@ -737,7 +779,7 @@ provider 的 key 是 **Pi provider 名**(如 `"anthropic"`、`"openai"`、`"zhip
 - **类型：** `object`（部分覆盖——逐段三态）
 - **默认值：** *(内置默认)*
 - **状态：** 🟢 ACTIVE
-- **说明：** 覆盖 ACP 系统提示词的各段。十三个键：九个结构性文档段（`acpTags`、`summariesInContext`、`tools`、`whenToCompress`、`whenNotToCompress`、`multiTierIntro`、`decompressPhilosophy`、`contextBreakdown`、`throttleRetry`）加四个规则块（`philosophy`、`howToCompress`、`tier2`、`tier3`）。三态语义：字符串**替换**该段，`null` **删除**该段，省略则保持默认。不经风险门禁——若需经门禁替换规则文本请用 `prompts`；两者同时设置时 `promptSections` 生效（后应用）。示例：
+- **说明：** 覆盖 ACP 系统提示词的各段。十三个键（`acpTags`、`summariesInContext`、`tools`、`whenToCompress`、`whenNotToCompress`、`multiTierIntro`、`decompressPhilosophy`、`contextBreakdown`、`throttleRetry`、`philosophy`、`howToCompress`、`tier2`、`tier3`），统一三态语义（与内核 section 语义一致）：字符串**替换**该段，`null` **删除**该段，省略则保持默认。不经风险门禁——若需经门禁替换规则文本请用 `prompts`；两者同时设置时 `promptSections` 生效（后应用）。示例：
 
   ```json
   {
