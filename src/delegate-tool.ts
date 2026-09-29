@@ -35,6 +35,23 @@ const NOTIFY_COALESCE_MAX_MS = 10_000;
 const SESSION_EXT = ".session.jsonl";
 const ACTIVITY_TAIL_CHARS = 400;
 
+export type FramePressure = "NORMAL" | "WARN" | "CONVERGE" | "OVERFLOW";
+
+const FRAME_PRESSURE_RANK: Record<FramePressure, number> = {
+  NORMAL: 0,
+  WARN: 1,
+  CONVERGE: 2,
+  OVERFLOW: 3,
+};
+
+export function framePressure(currentBytes: number, maxBytes: number): FramePressure {
+  if (maxBytes <= 0 || currentBytes >= maxBytes) return "OVERFLOW";
+  const ratio = currentBytes / maxBytes;
+  if (ratio >= 0.8) return "CONVERGE";
+  if (ratio >= 0.6) return "WARN";
+  return "NORMAL";
+}
+
 /** Stdin for a resumed run: the original task and all earlier tool calls are
  *  already in the restored session history, so the child must continue, not
  *  restart. */
@@ -134,6 +151,16 @@ interface AgentDef {
   restricted?: boolean;
 }
 
+export const BOUNDED_READ_ONLY_REPORT = `
+Output contract (mandatory):
+- Keep the final reply under 8 KiB UTF-8.
+- Never print a complete file, complete diff, patch, or large log.
+- For each finding include severity, path:line, at most 3 relevant code lines, and a short reason.
+- End with: changed files, tests, remaining blockers.
+- Use bounded read/grep ranges and result limits.
+- If the task covers multiple independent areas, stop and report NEEDS_SPLIT instead of expanding scope.
+- Do not create another sub-agent.`;
+
 // Minimal roster. The tool description lists these so the model knows how to
 // pick one — no separate prompt injection needed (keeps fixed cost tiny).
 const AGENTS: Record<string, AgentDef> = {
@@ -141,34 +168,36 @@ const AGENTS: Record<string, AgentDef> = {
     tools: RESTRICTED_TOOLS,
     restricted: true,
     prompt: `You are a senior code reviewer with read-only access.
-Read the given code and report: bugs, security/safety risks, correctness issues, and concrete improvement suggestions.
-Be specific — cite file:line for every finding. Do NOT modify any files; only read and report.`,
+Read the assigned code and report bugs, security/safety risks, correctness issues, and concrete improvement suggestions.
+Be specific — cite file:line for every finding. Do NOT modify any files; only read and report.${BOUNDED_READ_ONLY_REPORT}`,
   },
   researcher: {
     tools: RESTRICTED_TOOLS,
     restricted: true,
     prompt: `You are a code researcher with read-only access.
-Investigate the codebase to answer the question thoroughly. Report findings with exact file:line references, function/type signatures, and relevant code snippets.
-Do NOT modify any files; only read and report.`,
+Investigate only the assigned question and report exact file:line references and concise evidence.
+Do NOT modify any files; only read and report.${BOUNDED_READ_ONLY_REPORT}`,
   },
   worker: {
     tools: "read,edit,write,bash",
     prompt: `You are a precise implementer.
 Make exactly the requested code changes — minimal, focused, following existing project conventions (check AGENTS.md first if present).
-After editing, briefly summarize what you changed and why. Do not expand scope.`,
+After editing, briefly summarize what you changed and why. Do not expand scope.
+Keep the final summary concise; do not print complete files or diffs.`,
   },
   planner: {
     tools: RESTRICTED_TOOLS,
     restricted: true,
     prompt: `You are a technical planner with read-only access.
-Analyze the task and produce a concrete, ordered step-by-step implementation plan with rationale for each step.
-Cite file:line for code you reference. Do NOT modify any files; only read and propose.`,
+Analyze only the assigned scope and produce a concrete, ordered plan with concise rationale.
+Cite file:line for code you reference. Do NOT modify any files; only read and propose.${BOUNDED_READ_ONLY_REPORT}`,
   },
   oracle: {
     tools: RESTRICTED_TOOLS,
     restricted: true,
     prompt: `You are an expert advisor with read-only access.
-Answer the question concisely with clear reasoning. Cite file:line when referencing code. Do NOT modify any files.`,
+Answer the assigned question concisely with clear reasoning and file:line references when relevant.
+Do NOT modify any files; only read and report.${BOUNDED_READ_ONLY_REPORT}`,
   },
 };
 
@@ -189,6 +218,10 @@ interface DelegateRun {
   exitCode?: number | null;
   /** Exit signal when the child died by signal (exit code null), e.g. "SIGTERM". */
   exitSignal?: NodeJS.Signals;
+  /** Highest incomplete JSONL frame pressure reached by this run. */
+  maxFramePressure?: FramePressure;
+  /** Machine-readable terminal failure reason, when one is known. */
+  failureReason?: string;
   child?: ChildProcess;
   result?: { code: number | null; file: string; body: string };
   /** Live activity log path (async json-stream runs only). */
@@ -729,6 +762,8 @@ The delegate runs in its own clean pi process — it does NOT see this conversat
       'acp_delegate({ agent: "reviewer", task: "Review src/index.ts for race conditions" })',
     promptGuidelines: [
       "Delegate to get a focused result in a clean context, or to parallelize independent work.",
+      "Split reviews by independent area (binding/schema, DTS, driver, validation) before delegating; the main agent owns synthesis.",
+      "Never request a complete file, complete diff, patch, or large log from a delegate.",
       "The sub-agent has NO access to this conversation — write a fully self-contained task.",
       "Prefer async=true and launch several; results arrive back automatically when each finishes.",
       "A FAILED notification (⚠️) means that task produced no usable result — read the excerpt and the output files, then decide whether to re-dispatch it before wrapping up.",
@@ -1446,6 +1481,34 @@ async function runDelegate(
       let stdoutBuf = "";
       let stderrText = "";
       let streamOverflow = false;
+      let currentFramePressure: FramePressure = "NORMAL";
+      let maxFramePressure: FramePressure = "NORMAL";
+      const observeFramePressure = (): boolean => {
+        const next = framePressure(Buffer.byteLength(stdoutBuf, "utf8"), MAX_JSONL_FRAME_BYTES);
+        if (next !== currentFramePressure) {
+          if (FRAME_PRESSURE_RANK[next] > FRAME_PRESSURE_RANK[currentFramePressure] && next !== "NORMAL") {
+            logWarn("delegate", {
+              event: "frame-pressure",
+              runId,
+              agent: args.agent,
+              pressure: next,
+              bytes: Buffer.byteLength(stdoutBuf, "utf8"),
+              limit: MAX_JSONL_FRAME_BYTES,
+            });
+          }
+          currentFramePressure = next;
+          if (FRAME_PRESSURE_RANK[next] > FRAME_PRESSURE_RANK[maxFramePressure]) {
+            maxFramePressure = next;
+            run.maxFramePressure = next;
+          }
+        }
+        if (next !== "OVERFLOW") return false;
+        streamOverflow = true;
+        stdoutBuf = "";
+        stderrText = `protocol error: JSONL frame exceeded ${MAX_JSONL_FRAME_BYTES} bytes`;
+        child.kill("SIGTERM");
+        return true;
+      };
       const applier = makeEventApplier(
         {
           showThinking: args.showThinking === true,
@@ -1463,26 +1526,15 @@ async function runDelegate(
         if (useJsonStream) {
           if (streamOverflow) return;
           stdoutBuf += c.toString("utf8");
-          if (Buffer.byteLength(stdoutBuf, "utf8") > MAX_JSONL_FRAME_BYTES) {
-            streamOverflow = true;
-            stdoutBuf = "";
-            stderrText = `protocol error: JSONL frame exceeded ${MAX_JSONL_FRAME_BYTES} bytes`;
-            child.kill("SIGTERM");
-            return;
-          }
+          if (observeFramePressure()) return;
           let nl: number;
           while ((nl = stdoutBuf.indexOf("\n")) >= 0) {
             const line = stdoutBuf.slice(0, nl);
             stdoutBuf = stdoutBuf.slice(nl + 1);
+            currentFramePressure = "NORMAL";
             applier.handleEventLine(line);
           }
-          if (Buffer.byteLength(stdoutBuf, "utf8") > MAX_JSONL_FRAME_BYTES) {
-            streamOverflow = true;
-            stdoutBuf = "";
-            stderrText = `protocol error: JSONL frame exceeded ${MAX_JSONL_FRAME_BYTES} bytes`;
-            child.kill("SIGTERM");
-            return;
-          }
+          if (observeFramePressure()) return;
         } else {
           // omp fallback: `-p` prints the plain reply, so stdout IS the reply —
           // stream it straight through (no line buffering, so a trailing chunk
@@ -1530,6 +1582,10 @@ async function runDelegate(
             if (tail) parts.push(`last activity (full log: \`${activityFile}\`):\n${tail}`);
             if (output) parts.push(`partial reply:\n${output}`);
             body = parts.join("\n\n") || "(no output)";
+          }
+          if (streamOverflow) {
+            run.failureReason = "protocol-frame-overflow";
+            body = `${protocolOverflowNote(run.maxFramePressure)}\n\n${body}`;
           }
           // Cancelled runs KEEP their files: the partial output is exactly what
           // the model/user wants to inspect. Backfill like the failure path,
@@ -2029,8 +2085,11 @@ export function injectResult(
     if (lines.length) usageNote = ` Usage: ${lines.join(", ")}.`;
   }
   
+  const overflow = body?.includes("reason: protocol-frame-overflow") === true;
   const closing = failed
-    ? "This delegate did NOT complete its task — its result is missing from your work. Read the error excerpt (and the result file if present), then decide whether to re-dispatch the task before wrapping up. This is an automated system notification, NOT a user message."
+    ? overflow
+      ? "This delegate exceeded the JSONL frame limit. Partial output is retained: read the result file first, then split the task by independent area and retry with a bounded report. This is an automated system notification, NOT a user message."
+      : "This delegate did NOT complete its task — its result is missing from your work. Read the error excerpt (and the result file if present), then decide whether to re-dispatch the task before wrapping up. This is an automated system notification, NOT a user message."
     : "This is an automated system notification, NOT a user message. Read the result file if you need the details, then continue your original task; do not treat this as a new user request.";
   const header = `[acp_delegate ${statusLabel}] **${agent}** (runId \`${runId}\`, ${exitLabel(code, signal)})${timeoutNote}${remainingLine}${usageNote} ${closing}`;
   const { text: recoveryText, covered } = buildRecoveryNotice(Array.from(runs.values()), runId);
@@ -2070,6 +2129,10 @@ function notifyTerminalFailure(pi: ExtensionAPI, run: DelegateRun): void {
 // and the result file path. NO preview: the model uses `read` for details,
 // and that read (not this message) is the large content. Keeping this minimal
 // means it stays cheap to retain in context (or to compress away).
+export function protocolOverflowNote(pressure: FramePressure = "OVERFLOW"): string {
+  return `reason: protocol-frame-overflow\npartialOutput: true\npressure: ${pressure}\nrecommendedAction: split-and-retry`;
+}
+
 function formatPayload(header: string, file: string, task: string, body?: string, activityFile?: string): string {
   const lines: string[] = [header, "", `Task: ${truncate(task, 160)}`];
   if (file) {
