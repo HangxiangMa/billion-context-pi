@@ -56,7 +56,8 @@ export function statusIcon(status: FleetRunView["status"]): string {
 
 export function usageSummary(usage: FleetRunView["usage"]): string | undefined {
   if (!usage || usage.totalTokens <= 0) return undefined;
-  return `\u2191${usage.input.toLocaleString()} \u2193${usage.output.toLocaleString()}`;
+  const cost = usage.cost.total > 0 ? ` · $${usage.cost.total.toFixed(4)}` : "";
+  return `\u2191${usage.input.toLocaleString()} \u2193${usage.output.toLocaleString()}${cost}`;
 }
 
 export interface ListRow {

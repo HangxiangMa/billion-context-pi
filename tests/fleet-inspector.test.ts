@@ -47,8 +47,8 @@ test("statusIcon maps each run status", () => {
 test("usageSummary hides zero-usage and formats tokens", () => {
   assert.equal(usageSummary(undefined), undefined);
   assert.equal(usageSummary({ input: 0, output: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }), undefined);
-  const s = usageSummary({ input: 1234, output: 56, totalTokens: 1290, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
-  assert.ok(s!.includes("1,234") && s!.includes("56"), s);
+  const s = usageSummary({ input: 1234, output: 56, totalTokens: 1290, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.0123 } });
+  assert.ok(s!.includes("1,234") && s!.includes("56") && s!.includes("$0.0123"), s);
 });
 
 // ─── readTailSync ───────────────────────────────────────────────────────────

@@ -386,11 +386,10 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       if (ctx.hasUI) ctx.ui.notify(msg);
     });
     if (!ctx.hasUI) await updateCheck;
-    // Bind the TUI status widget for async delegates. The widget reads the
-    // in-memory runs Map (via runningRunsSnapshot) and renders a live list of
-    // running delegates below the editor. Only the interactive TUI has a UI;
-    // rpc/json/print have hasUI=false and the call is a no-op.
-    delegateStatusWidget.setContext(ctx, runningRunsSnapshot, delegatePolicy.fleetShortcut);
+    // Publish delegate runs to the host task dock. It owns the single live list
+    // below the editor; this bridge also keeps /acp-fleet's shortcut visible.
+    // Only the interactive TUI has a UI; rpc/json/print have hasUI=false.
+    delegateStatusWidget.setContext(ctx, runningRunsSnapshot, pi, fleetRunsSnapshot, delegatePolicy.fleetShortcut);
   });
   pi.on("session_shutdown", (_event, ctx) => {
     const sid = ctx.sessionManager.getSessionId();
