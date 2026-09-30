@@ -612,7 +612,8 @@ The `hostSession` key controls **turn-boundary detection** for hosts that run se
   ```json
   {
     "hostSession": {
-      "countCustomMessages": true
+      "countCustomMessages": true,
+      "customMessageTypes": ["agent_message", "async_bash_completion", "rlm_child_terminal_notice", "heartbeat_prompt"]
     }
   }
   ```
@@ -625,6 +626,13 @@ The `hostSession` key controls **turn-boundary detection** for hosts that run se
 - **Default:** `false`
 - **Status:** 🟢 ACTIVE
 - **Description:** Count host-injected `custom_message` entries with non-empty text (except UI-only `acp-status` panels) as turn boundaries for all per-turn ledgers; empty injections are pure control signals and start no turn. Does not change LLM-context projection — those entries were already projected as user-role messages under Pi-native semantics.
+
+### `hostSession.customMessageTypes`
+
+- **Type:** string[]
+- **Default:** unset (every non-empty injected type counts when opted in)
+- **Status:** 🟢 ACTIVE
+- **Description:** Optional `customType` allowlist refining `countCustomMessages`: when set (with `countCustomMessages: true`), only injected `custom_message` entries whose `customType` is listed start a turn — metadata injections that enter LLM context without being a real host turn (e.g. Prime's `harness_digest`, `ipython_state`) no longer reset nudge/retry accounting (#578). Entries without a `customType` never match; UI-only types (`acp-status`, `acp-export`, `acp-rule`) stay excluded even when listed. Ignored unless `countCustomMessages: true`; malformed values (non-array, non-string or empty-string members) warn and fall back to "all injected types count". An empty array is explicit "count none". Example above is Prime's set of genuine host-turn types.
 
 ---
 

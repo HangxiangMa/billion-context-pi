@@ -35,7 +35,11 @@ message" can never drift apart again.
    and only if they carry non-empty text (the same `extractText` gate projection uses).
    Empty injections are pure control signals: they never enter LLM context, so they
    start no turn either. UI-only `acp-status` panels (the `/acp` slash-command output)
-   are excluded even under the opt-in.
+   are excluded even under the opt-in. When the host additionally sets
+   `customMessageTypes`, the opt-in is refined to an allowlist: only injected entries
+   whose `customType` is listed start a turn (#578) — metadata injections like
+   `harness_digest` / `ipython_state` stay out of turn accounting. Entries without a
+   `customType` never match; UI-only types stay excluded even when listed.
 4. LLM-context projection is **independent of this policy**: `custom_message` entries were
    and remain projected as user-role messages (Pi-native semantics). The policy only changes
    *turn accounting*, not what the model sees.
@@ -49,9 +53,17 @@ or equivalently
 ```json
 { "hostSession": { "countCustomMessages": true } }
 ```
+or, when the host also injects non-turn metadata that must not reset turn accounting
+(Prime: `harness_digest`, `ipython_state`), restrict the opt-in to the genuine host-turn
+types (#578):
+```json
+{ "hostSession": { "countCustomMessages": true, "customMessageTypes": ["agent_message", "async_bash_completion", "rlm_child_terminal_notice", "heartbeat_prompt"] } }
+```
 in `~/.pi/acp.json` / `<project>/.pi/acp.json`, or programmatically on the adapter config
 passed to `createAcpExtension(adapter)`. Invalid values warn and fall back to off; they
-never fail a session.
+never fail a session. `customMessageTypes` only takes effect with
+`countCustomMessages: true` (an orphaned allowlist warns and is dropped); malformed
+values fall back to "all injected types count"; an empty array is explicit "count none".
 
 **Default-off guarantee:** with no `hostSession` key the predicate reduces to the exact
 pre-#364 rule (user-role only). This is pinned by unit tests that compare against the
