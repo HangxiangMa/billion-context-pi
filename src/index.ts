@@ -4,12 +4,10 @@ import type {
   ExtensionFactory,
   SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
-import { CONFIG_DIR_NAME } from "./config-dir.js";
+import { acpJsonFiles } from "./config-dir.js";
 import { parseAcpJson } from "./user-config.js";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
 import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges } from "acp-kernel";
 import { type AdapterConfig, resolveDelegate, resolveHostSession, DEFAULT_DELEGATE_POLICY } from "./config.js";
@@ -151,8 +149,7 @@ export default createAcpExtension();
 // files are repaired when possible and otherwise warned about loudly (#467).
 function userConfigDisabled(cwd: string): boolean {
   let disabled: boolean | undefined;
-  for (const base of [join(homedir(), CONFIG_DIR_NAME), join(cwd, CONFIG_DIR_NAME)]) {
-    const file = join(base, "acp.json");
+  for (const file of acpJsonFiles(cwd)) {
     let text: string;
     try {
       text = readFileSync(file, "utf8");
