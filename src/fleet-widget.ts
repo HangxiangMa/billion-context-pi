@@ -44,13 +44,28 @@ function emitBridge(): void {
       startedAt: r.startedAt,
       finishedAt: r.finishedAt,
       cost: r.usage?.cost.total,
-      tokens: r.usage ? { input: r.usage.input, output: r.usage.output } : undefined,
+      tokens: r.usage
+        ? {
+            input: r.usage.input,
+            output: r.usage.output,
+            cacheRead: r.usage.cacheRead,
+            cacheWrite: r.usage.cacheWrite,
+          }
+        : undefined,
     }));
     const usage = getDelegateUsage();
     pi.events.emit(BRIDGE_CHANNEL, {
       runs,
       fleetShortcut,
-      usage: usage ? { input: usage.input, output: usage.output, cost: usage.cost.total } : undefined,
+      usage: usage
+        ? {
+            input: usage.input,
+            output: usage.output,
+            cacheRead: usage.cacheRead,
+            cacheWrite: usage.cacheWrite,
+            cost: usage.cost.total,
+          }
+        : undefined,
     });
   } catch {
     // Best-effort UI bridge; never break delegation.

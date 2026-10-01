@@ -95,7 +95,14 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
       detail: run.task,
       summary: run.status === "running" ? undefined : `${run.status} · ${run.exitLabel}`,
       activity: run.timedOut ? `timed out: ${run.timedOut}` : undefined,
-      tokens: run.usage ? { input: run.usage.input, output: run.usage.output } : undefined,
+      tokens: run.usage
+        ? {
+            input: run.usage.input,
+            output: run.usage.output,
+            cacheRead: run.usage.cacheRead,
+            cacheWrite: run.usage.cacheWrite,
+          }
+        : undefined,
     }));
     if (process.env.BILLION_CONTEXT_PROXY) {
       console.log("[bcp] disabled: BILLION_CONTEXT_PROXY detected — proxy handles compression");
